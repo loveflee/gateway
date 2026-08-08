@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Edge Gateway Config</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--sf:#1a1d27;--sf2:#22263a;--bd:#2e3347;
+  --tx:#e2e8f0;--mu:#8892a4;--ac:#3b82f6;--ac2:#1d4ed8;
+  --ok:#22c55e;--wn:#f59e0b;--er:#ef4444;--r:8px;
+  --mono:'SF Mono','Fira Code',monospace
+}
+body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;padding-bottom:4rem}
+.hdr{background:var(--sf);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:100}
+.hdr-in{max-width:960px;margin:auto;display:flex;align-items:center;justify-content:space-between;height:52px;padding:0 1rem}
+.logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.hdr-btns{display:flex;gap:.5rem}
+.wrap{max-width:960px;margin:auto;padding:1rem}
+.sec{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);margin-bottom:1rem;overflow:hidden}
+.sec-hdr{display:flex;align-items:center;justify-content:space-between;padding:.65rem 1rem;border-bottom:1px solid var(--bd);cursor:pointer;user-select:none}
+.sec-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--mu);display:flex;align-items:center;gap:6px}
+.sec-icon{font-size:15px}
+.chevron{transition:transform .2s;color:var(--mu);font-size:12px}
+.sec-body{padding:1rem}
+.collapsed .sec-body{display:none}
+.collapsed .chevron{transform:rotate(-90deg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.75rem}
+.grid-2{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+.full{grid-column:1/-1}
+@media(max-width:500px){.grid,.grid-2{grid-template-columns:1fr}}
+.field{display:flex;flex-direction:column;gap:.3rem}
+label{font-size:11px;color:var(--mu);font-weight:500}
+input,select,textarea{
+  background:var(--sf2);color:var(--tx);border:1px solid var(--bd);
+  border-radius:6px;padding:.45rem .65rem;font-size:13px;outline:none;
+  width:100%;transition:border-color .15s;-webkit-appearance:none
+}
+input:focus,select:focus,textarea:focus{border-color:var(--ac)}
+.sel-wrap{position:relative}
+.sel-wrap::after{content:'';position:absolute;right:.65rem;top:50%;transform:translateY(-50%);
+  width:0;height:0;pointer-events:none;
+  border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--mu)}
+input[type=number]{-moz-appearance:textfield}
+input[type=number]::-webkit-inner-spin-button{display:none}
+.hint{font-size:11px;color:var(--mu);margin-top:.15rem}
+.btn{border:none;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px;padding:.45rem .85rem;transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-p{background:var(--ac);color:#fff}
+.btn-p:hover:not(:disabled){background:var(--ac2)}
+.btn-w{background:#78350f;color:#fbbf24;border:1px solid #92400e}
+.btn-w:hover:not(:disabled){background:#92400e}
+.btn-d{background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b}
+.btn-d:hover:not(:disabled){background:#991b1b}
+.btn-g{background:transparent;color:var(--mu);border:1px solid var(--bd)}
+.btn-g:hover:not(:disabled){background:var(--sf2);color:var(--tx)}
+.btn-add{width:100%;margin-top:.5rem;border:1px dashed var(--bd);background:transparent;
+  color:var(--mu);border-radius:6px;padding:.55rem;font-size:13px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s}
+.btn-add:hover{border-color:var(--ac);color:var(--ac);background:rgba(59,130,246,.05)}
+.dev-card{background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:.75rem;margin-bottom:.65rem;position:relative}
+.dev-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:.65rem}
+.dev-badge{font-size:11px;padding:2px 8px;border-radius:20px;background:var(--sf2);border:1px solid var(--bd);color:var(--mu)}
+.btn-rm{background:transparent;border:1px solid #7f1d1d;border-radius:5px;color:#fca5a5;
+  padding:2px 8px;font-size:11px;cursor:pointer;transition:background .15s}
+.btn-rm:hover{background:#7f1d1d}
+.status{padding:.5rem .75rem;border-radius:6px;font-size:12px;margin-top:.5rem;display:none}
+.status.show{display:block}
+.status.ok{background:#14532d;color:#86efac;border:1px solid #166534}
+.status.err{background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b}
+.status.info{background:#1e3a5f;color:#93c5fd;border:1px solid #1d4ed8}
+.status.wn{background:#78350f;color:#fbbf24;border:1px solid #92400e}
+/* 🚨 設備隔離告警橫幅：設定改錯時必須一眼看見，且不可關閉 */
+.qbanner{display:none;margin-top:.75rem;padding:.85rem 1rem;border-radius:8px;
+  background:#7f1d1d;color:#fecaca;border:2px solid #dc2626;font-size:13px;
+  box-shadow:0 0 0 3px rgba(220,38,38,.15);animation:qpulse 2s ease-in-out infinite}
+.qbanner.show{display:block}
+.qbanner h4{margin:0 0 .4rem;font-size:14px;color:#fff;font-weight:700}
+.qbanner ul{margin:.4rem 0 0;padding-left:1.1rem}
+.qbanner li{margin:.3rem 0;line-height:1.45}
+.qbanner code{background:rgba(0,0,0,.35);padding:1px 5px;border-radius:3px;
+  font-family:var(--mono);color:#fca5a5}
+.qbanner .qhint{margin-top:.55rem;padding-top:.5rem;border-top:1px solid #991b1b;color:#fca5a5}
+@keyframes qpulse{0%,100%{box-shadow:0 0 0 3px rgba(220,38,38,.15)}
+  50%{box-shadow:0 0 0 6px rgba(220,38,38,.28)}}
+.raw-toggle{text-align:center;padding:.5rem;color:var(--mu);font-size:12px;cursor:pointer;user-select:none}
+.raw-toggle:hover{color:var(--tx)}
+.raw-wrap{display:none;padding:0 1rem 1rem}
+.raw-wrap.show{display:block}
+textarea.raw{min-height:260px;font-family:var(--mono);font-size:12px;color:#79c0ff;background:#0d1117;resize:vertical;width:100%;padding:10px;border-radius:6px;border:1px solid var(--bd);}
+.sep{height:1px;background:var(--bd);margin:.5rem 0}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:sp .6s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* 🚨 升級：iOS 風格 Switch 切換開關 */
+.switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--bd); transition: .2s; border-radius: 20px; }
+.slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .2s; border-radius: 50%; }
+input:checked + .slider { background-color: var(--ok); }
+input:checked + .slider:before { transform: translateX(16px); }
+
+/* 🚨 升級：狀態銘牌 (Badge) */
+.badge-on { background: #14532d; color: #86efac; border: 1px solid #166534; padding: 2px 8px; border-radius: 4px; font-size: 11px; display: inline-block; }
+.badge-off { background: #7f1d1d; color: #fca5a5; border: 1px solid #991b1b; padding: 2px 8px; border-radius: 4px; font-size: 11px; display: inline-block; }
+
+/* 🚨 升級：模擬終端機 Console (取代 Textarea 實現高亮分色) */
+.log-box { 
+  min-height: 150px; max-height: 300px; overflow-y: auto; 
+  background: #0d1117; padding: 10px; border-radius: 6px; border: 1px solid var(--bd);
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; word-wrap: break-word;
+}
+.log-tx { color: #38bdf8; } /* 亮藍色 */
+.log-rx { color: #34d399; } /* 螢光綠 */
+.log-err { color: #f87171; } /* 紅色 */
+.log-sys { color: #fbbf24; } /* 黃色 */
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="hdr-in">
+    <div class="logo"><div class="dot" id="led"></div><span id="gw-title">Edge Gateway</span></div>
+    <div class="hdr-btns">
+      <button class="btn btn-g" id="b-restore" onclick="restoreConfig()">↩ 還原</button>
+      <button class="btn btn-p" id="b-save" onclick="saveConfig()">💾 儲存</button>
+      <button class="btn btn-d" id="b-restart" onclick="restartSystem()">⟳ 重啟</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div id="qbanner" class="qbanner"></div>
+  <div class="status" id="st"></div>
+
+  <!-- ── 系統設定 ── -->
+  <div class="sec" id="s-sys">
+    <div class="sec-hdr" onclick="toggle('s-sys')">
+      <span class="sec-title"><span class="sec-icon">⚙</span> 系統設定</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div class="grid">
+        <div class="field">
+          <label>Node ID</label>
+          <input id="node_id" type="text" placeholder="edge_gw_01">
+          <span class="hint">影響所有 HA MQTT Topic 命名</span>
+        </div>
+        <div class="field">
+          <label>Log 等級</label>
+          <div class="sel-wrap">
+            <select id="log_level">
+              <option value="DEBUG">DEBUG — 詳細追蹤</option>
+              <option value="INFO">INFO — 標準運行</option>
+              <option value="WARNING">WARNING — 僅警告</option>
+              <option value="ERROR">ERROR — 僅錯誤</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Sniffer 偵錯模式</label>
+          <div class="sel-wrap">
+            <select id="enable_sniffer">
+              <option value="false">關閉 (正常生產模式)</option>
+              <option value="true">開啟 (暫停輪詢，獨占硬體抓包)</option>
+            </select>
+          </div>
+          <span class="hint">現場測試未知設備專用</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MQTT ── -->
+  <div class="sec" id="s-mqtt">
+    <div class="sec-hdr" onclick="toggle('s-mqtt')">
+      <span class="sec-title"><span class="sec-icon">📡</span> MQTT Broker</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div class="grid">
+        <div class="field"><label>Broker IP</label><input id="mqtt_broker" type="text" placeholder="192.168.1.x"></div>
+        <div class="field"><label>Port</label><input id="mqtt_port" type="number" placeholder="1883"></div>
+        <div class="field"><label>帳號／密碼</label><span class="hint">由專案根目錄 .env 的 MQTT_USERNAME／MQTT_PASSWORD 提供</span></div>
+        <div class="field"><label>Discovery Prefix</label><input id="mqtt_prefix" type="text" placeholder="homeassistant"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Driver ── -->
+  <div class="sec" id="s-drv">
+    <div class="sec-hdr" onclick="toggle('s-drv')">
+      <span class="sec-title"><span class="sec-icon">🔌</span> 主動驅動設定 (Driver)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div class="grid" style="margin-bottom:.75rem">
+        <div class="field">
+          <label>驅動類型</label>
+          <div class="sel-wrap">
+            <select id="drv_type" onchange="onDrvType()">
+              <option value="tcp">tcp — Modbus TCP 原生</option>
+              <option value="rtu">rtu — RTU over TCP (串口伺服器)</option>
+              <option value="usb">usb — USB RS485 本機串口</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div id="drv-tcp-fields">
+        <div class="grid grid-2">
+          <div class="field"><label>Host / IP</label><input id="drv_host" type="text" placeholder="192.168.1.x"></div>
+          <div class="field"><label>Port</label><input id="drv_port" type="number" placeholder="502"></div>
+        </div>
+      </div>
+
+      <div id="drv-usb-fields" style="display:none">
+        <div class="grid grid-2">
+          <div class="field"><label>串口路徑</label><input id="drv_serial_port" type="text" placeholder="/dev/ttyUSB0"></div>
+          <div class="field"><label>Baudrate</label><input id="drv_baudrate" type="number" placeholder="9600"></div>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+      <div style="font-size:11px;color:var(--mu);margin-bottom:.5rem;font-weight:500">進階參數</div>
+      <div class="grid grid-2">
+        <div class="field"><label>Timeout (秒)</label><input id="drv_timeout" type="number" step="0.1" placeholder="1.0"></div>
+        <div class="field"><label>Inter Frame Delay (秒)</label><input id="drv_ifd" type="number" step="0.01" placeholder="0.18"></div>
+        <div class="field"><label>Connect Timeout (秒)</label><input id="drv_ct" type="number" step="0.5" placeholder="5.0"></div>
+        <div class="field"><label>Idle Timeout (秒)</label><input id="drv_it" type="number" step="0.01" placeholder="0.03"></div>
+        <div class="field"><label>Max Response Bytes</label><input id="drv_mrb" type="number" placeholder="2048"></div>
+        <div class="field"><label>Max Frame Time (秒)</label><input id="drv_mft" type="number" step="0.1" placeholder="1.0"></div>
+        <div class="field"><label>Flush Max Time (秒)</label><input id="drv_fmt" type="number" step="0.01" placeholder="0.05"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Listen Driver ── -->
+  <div class="sec" id="s-lis">
+    <div class="sec-hdr" onclick="toggle('s-lis')">
+      <span class="sec-title"><span class="sec-icon">👂</span> 旁路監聽驅動 (listen_driver)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div class="grid" style="margin-bottom:.65rem">
+        <div class="field">
+          <label>驅動類型</label>
+          <div class="sel-wrap">
+            <select id="lis_type" onchange="onLisType()">
+              <option value="tcp">tcp — TCP 監聽</option>
+              <option value="usb">usb — USB 串口監聽</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div id="lis-net">
+        <div class="grid grid-2">
+          <div class="field"><label>Host / IP</label><input id="lis_host" type="text" placeholder="192.168.1.x"></div>
+          <div class="field"><label>Port</label><input id="lis_port" type="number" placeholder="8234"></div>
+        </div>
+      </div>
+      <div id="lis-usb" style="display:none">
+        <div class="grid grid-2">
+          <div class="field"><label>串口路徑</label><input id="lis_sport" type="text" placeholder="/dev/ttyUSB1"></div>
+          <div class="field"><label>Baudrate</label><input id="lis_baud" type="number" placeholder="9600"></div>
+        </div>
+      </div>
+      <span class="hint" style="display:block;margin-top:.5rem">若無旁路監聽設備可留空，不會寫入 config.yaml</span>
+    </div>
+  </div>
+
+  <!-- ── Bus ── -->
+  <div class="sec" id="s-bus">
+    <div class="sec-hdr" onclick="toggle('s-bus')">
+      <span class="sec-title"><span class="sec-icon">🚌</span> 總線參數 (bus)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div class="grid">
+        <div class="field">
+          <label>Offline Time (秒)</label>
+          <input id="bus_ot" type="number" placeholder="60">
+          <span class="hint">設備超時多久判定 OFFLINE</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Devices ── -->
+  <div class="sec" id="s-dev">
+    <div class="sec-hdr" onclick="toggle('s-dev')">
+      <span class="sec-title"><span class="sec-icon">📟</span> 設備列表 (Devices)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div id="dev-list"></div>
+      <button class="btn-add" onclick="addDevice()">＋ 新增設備</button>
+    </div>
+  </div>
+
+  <!-- 🚨 Sniffer 模式大黑窗 ── -->
+  <div class="sec" id="s-sniff" style="display:none; border-color: var(--wn);">
+    <div class="sec-hdr">
+      <span class="sec-title" style="color: var(--wn);"><span class="sec-icon">🔬</span> Sniffer 抓包器 (獨占探測模式)</span>
+    </div>
+    <div class="sec-body">
+      <div class="field">
+        <label style="color:#fbbf24;">Hex 指令 (空格分隔)</label>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input id="sniff-hex" type="text" placeholder="01 03 00 00 00 0A" style="font-family:var(--mono); letter-spacing:.05em; border-color:#92400e; flex-grow:1;">
+          
+          <!-- 💡 升級：自動 CRC iOS Switch -->
+          <div style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+            <label class="switch">
+              <input type="checkbox" id="sniff-crc" checked onchange="updateCrcState()">
+              <span class="slider"></span>
+            </label>
+            <span style="color:var(--mu); font-size:12px; cursor:pointer;" onclick="document.getElementById('sniff-crc').click()">自動補 CRC</span>
+            <span id="crc-state" class="badge-on">已啟用</span>
+          </div>
+
+          <button class="btn btn-w" style="flex-shrink:0;" onclick="sniffSend()">▶ 發送</button>
+        </div>
+      </div>
+      <div style="margin-top:.75rem">
+        <label style="color:#fbbf24;">回應日誌 (RX)</label>
+        <!-- 💡 升級：Div Console 代替 Textarea 以支援分色 -->
+        <div class="log-box" id="sniff-resp" style="border-color:#92400e; background:#1e1414;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🟢 即時總線監控 (唯讀) ── -->
+  <div class="sec" id="s-monitor" style="border-color: #059669;">
+    <div class="sec-hdr" onclick="toggle('s-monitor')">
+      <span class="sec-title" style="color: #34d399;"><span class="sec-icon">👁️</span> 總線即時側錄 (Read-Only)</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="sec-body">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:.75rem;">
+        
+        <!-- 💡 升級：自動刷新 iOS Switch -->
+        <div style="display:flex; align-items:center; gap:6px;">
+          <label class="switch">
+            <input type="checkbox" id="mon-auto" onchange="toggleMonitor()">
+            <span class="slider"></span>
+          </label>
+          <span style="color:var(--mu); font-size:12px; cursor:pointer;" onclick="document.getElementById('mon-auto').click()">自動刷新 (1秒)</span>
+          <span id="mon-state" class="badge-off">已停止</span>
+        </div>
+
+        <button class="btn btn-g" onclick="fetchTraffic()">↻ 手動刷新</button>
+      </div>
+      <!-- 💡 升級：Div Console 代替 Textarea 以支援分色 -->
+      <div class="log-box" id="mon-resp" style="border-color:#065f46; background:#062319;">
+        <span style="color:var(--mu)">等待抓取封包...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Raw YAML 備援 ── -->
+  <div class="sec">
+    <div class="raw-toggle" onclick="toggleRaw()">▾ 進階：Raw YAML 編輯器（展開後儲存以此為準）</div>
+    <div class="raw-wrap" id="raw-wrap">
+      <textarea class="raw" id="raw-yaml" spellcheck="false"></textarea>
+      <div style="margin-top:.5rem;display:flex;gap:.5rem">
+        <button class="btn btn-g" onclick="formToRaw()">表單 → YAML</button>
+        <button class="btn btn-g" onclick="rawToForm()">YAML → 表單</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/api/js-yaml.min.js" onerror="this.onerror=null; this.src='https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js';"></script>
+
+<script>
+let devCount = 0;
+let rawConfigObj = {};
+let sniffHistory = []; // 用於保存 Sniffer 日誌狀態
+
+const $  = id => document.getElementById(id);
+const st = (msg, cls) => { const el=$('st'); el.textContent=msg; el.className='status show '+cls; if(cls==='ok') setTimeout(()=>el.classList.remove('show'),4000); };
+const gv = id => ($( id)||{}).value || '';
+const sv = (id, v) => { if($(id)) $(id).value = v ?? ''; };
+const sfv = (id, v) => { if($(id) && v !== undefined && v !== null) $(id).value = v; };
+const nf  = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+const ni  = v => { const n = parseInt(v);   return isNaN(n) ? null : n; };
+
+function toggle(id){ $( id).classList.toggle('collapsed'); }
+function toggleRaw(){
+  const wrap = $('raw-wrap');
+  const isOpening = !wrap.classList.contains('show');
+  if (isOpening) {
+    formToRaw();
+    wrap.classList.add('show');
+  } else {
+    try {
+      const d = jsyaml.load($('raw-yaml').value);
+      if (!d) { st('Raw 內容為空，無法收起', 'err'); return; }
+      populateForm(d);
+      wrap.classList.remove('show');
+    } catch (e) {
+      st('YAML 格式錯誤，請修正後再收起：' + e.message, 'err');
+    }
+  }
+}
+function setLoading(id, on){ const b=$(id); if(!b) return; b.disabled=on; if(on){b._h=b.innerHTML; b.innerHTML='<span class="spin"></span>';} else if(b._h) b.innerHTML=b._h; }
+function onDrvType(){
+  const t=gv('drv_type');
+  $('drv-tcp-fields').style.display = t==='usb' ? 'none' : '';
+  $('drv-usb-fields').style.display = t==='usb' ? '' : 'none';
+}
+function onLisType() {
+  const t = gv('lis_type');
+  $('lis-net').style.display = t === 'usb' ? 'none' : '';
+  $('lis-usb').style.display = t === 'usb' ? '' : 'none';
+}
+
+function addDevice(d){
+  devCount++;
+  const id = 'dev-'+devCount;
+  const div = document.createElement('div');
+  div.className='dev-card'; div.id=id;
+  div.innerHTML=`
+    <div class="dev-hdr">
+      <span class="dev-badge">設備 #<span class="dev-num">${devCount}</span></span>
+      <button class="btn-rm" onclick="removeDevice('${id}')">✕ 刪除</button>
+    </div>
+    <div class="grid grid-2">
+      <div class="field"><label>UID</label><input class="d-uid" type="number" min="0" value="${d&&d.uid!=null?d.uid:''}"></div>
+      <div class="field"><label>Device Type</label><input class="d-type" type="text" value="${d&&d.device_type?d.device_type:''}"></div>
+      <div class="field"><label>Adapter</label>
+        <div class="sel-wrap">
+          <select class="d-adapter">
+            <option value="rtu">generic (RTU)</option>
+            <option value="tcp">tcp (Modbus TCP)</option>
+            <option value="jkbms">jkbms (旁路監聽)</option>
+            <option value="ampinvt">ampinvt (私有協議)</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Profile (地圖檔名)</label><input class="d-profile" type="text" value="${d&&d.profile?d.profile:''}"></div>
+      <div class="field"><label>Poll Interval</label><input class="d-interval" type="number" min="1" value="${d&&d.poll_interval!=null?d.poll_interval:10}"></div>
+      <div class="field"><label>模式</label>
+        <div class="sel-wrap">
+          <select class="d-mode">
+            <option value="active">active — 主動輪詢</option>
+            <option value="listen">listen — 旁路監聽</option>
+          </select>
+        </div>
+      </div>
+    </div>`;
+  $('dev-list').appendChild(div);
+  if(d){
+    if (d.adapter) div.querySelector('.d-adapter').value = d.adapter;
+    if (d.mode)    div.querySelector('.d-mode').value = d.mode;
+  }
+  reindex();
+}
+
+function removeDevice(id){ const el=$(id); if(el){ el.remove(); reindex(); } }
+function reindex(){ document.querySelectorAll('.dev-card').forEach((c,i)=>{ const n=c.querySelector('.dev-num'); if(n) n.textContent=i+1; }); }
+
+function collectDevices(){
+  const cards=document.querySelectorAll('.dev-card');
+  const arr=[];
+  cards.forEach(c=>{
+    const uid=parseInt(c.querySelector('.d-uid').value);
+    if(isNaN(uid)) return;
+    const mode=c.querySelector('.d-mode').value;
+    const obj={
+      uid, device_type:c.querySelector('.d-type').value||'',
+      adapter:c.querySelector('.d-adapter').value,
+      profile:c.querySelector('.d-profile').value||''
+    };
+    if(mode==='active') obj.poll_interval=parseInt(c.querySelector('.d-interval').value)||10;
+    obj.mode=mode;
+    arr.push(obj);
+  });
+  return arr;
+}
+
+function buildData(){
+  const type=gv('drv_type');
+  const drv={type};
+  if(type==='usb'){
+    const sp = gv('drv_serial_port'); if (sp) drv.port = sp;
+    const bd = parseInt(gv('drv_baudrate')); if(bd) drv.baudrate=bd;
+  } else {
+    const h=gv('drv_host'); if(h) drv.host=h;
+    const p=parseInt(gv('drv_port')); if(p) drv.port=p;
+  }
+  const nums={'drv_timeout':'timeout','drv_ifd':'inter_frame_delay','drv_ct':'connect_timeout','drv_it':'idle_timeout','drv_mrb':'max_response_bytes','drv_mft':'max_frame_time','drv_fmt':'flush_max_time'};
+  for(const [id,key] of Object.entries(nums)){ const v=parseFloat(gv(id)); if(!isNaN(v) && v!==0) drv[key]=v; }
+
+  let finalObj = rawConfigObj ? JSON.parse(JSON.stringify(rawConfigObj)) : {};
+
+  finalObj.system = Object.assign(finalObj.system || {}, {
+      node_id: gv('node_id'),
+      log_level: gv('log_level'),
+      enable_sniffer: gv('enable_sniffer') === 'true'
+  });
+  finalObj.mqtt = Object.assign(finalObj.mqtt || {}, {
+    broker: gv('mqtt_broker'), port: parseInt(gv('mqtt_port'))||1883,
+    discovery_prefix: gv('mqtt_prefix')
+  });
+  delete finalObj.mqtt.username;
+  delete finalObj.mqtt.password;
+  finalObj.driver = Object.assign(finalObj.driver || {}, drv);
+
+  const ltype = gv('lis_type');
+  const lhost = gv('lis_host'), lsport = gv('lis_sport');
+  if (ltype === 'usb' && lsport) {
+    finalObj.listen_driver = Object.assign(finalObj.listen_driver || {}, { type: 'usb', port: lsport });
+    const lb = ni(gv('lis_baud')); if (lb) finalObj.listen_driver.baudrate = lb;
+  } else if (ltype === 'tcp' && lhost) {
+    finalObj.listen_driver = Object.assign(finalObj.listen_driver || {}, { type: 'tcp', host: lhost });
+    const lp = ni(gv('lis_port')); if (lp) finalObj.listen_driver.port = lp;
+  }
+
+  const bot = ni(gv('bus_ot'));
+  if (bot !== null) finalObj.bus = Object.assign(finalObj.bus || {}, { offline_time: bot });
+
+  const oldDevs = finalObj.devices || [];
+  const newDevs = collectDevices();
+  const usedUid = new Set();
+
+  finalObj.devices = newDevs.map(n => {
+    if (usedUid.has(n.uid)) return n;
+    usedUid.add(n.uid);
+    const old = oldDevs.find(o => o.uid === n.uid);
+    return old ? Object.assign({}, old, n) : n;
+  });
+
+  return finalObj;
+}
+
+function formToRaw(){
+  if(typeof jsyaml === 'undefined') { alert("載入解析庫失敗，無法轉換 YAML"); return; }
+  try{ $('raw-yaml').value=jsyaml.dump(buildData(),{lineWidth:120,quotingType:'"',noCompatMode:true}); }
+  catch(e){ st('生成失敗：'+e,'err'); }
+}
+
+function rawToForm(){
+  if(typeof jsyaml === 'undefined') { alert("載入解析庫失敗，無法轉換 YAML"); return; }
+  try{
+    const d=jsyaml.load($('raw-yaml').value);
+    if(!d) return;
+    populateForm(d);
+    st('已從 YAML 套用至表單','info');
+  }catch(e){ st('YAML 格式錯誤：'+e,'err'); }
+}
+
+function populateForm(d){
+  if(!d) return;
+  rawConfigObj = d;
+
+  const sys=d.system||{}; sv('node_id',sys.node_id); sv('log_level',sys.log_level||'INFO');
+  sv('enable_sniffer', sys.enable_sniffer ? 'true' : 'false'); 
+
+  document.title='Edge Gateway — '+(sys.node_id||'');
+  $('gw-title').textContent='Edge Gateway — '+(sys.node_id||'');
+
+  const mq=d.mqtt||{};
+  sv('mqtt_broker',mq.broker); sv('mqtt_port',mq.port||1883);
+  sv('mqtt_prefix',mq.discovery_prefix||'homeassistant');
+
+  const dr=d.driver||{};
+  sv('drv_type',dr.type||'tcp'); onDrvType();
+  if(dr.type==='usb'){ sv('drv_serial_port',dr.port); sv('drv_baudrate',dr.baudrate); }
+  else { sv('drv_host',dr.host); sv('drv_port',dr.port); }
+  [['drv_timeout','timeout'],['drv_ifd','inter_frame_delay'],['drv_ct','connect_timeout'],
+   ['drv_it','idle_timeout'],['drv_mrb','max_response_bytes'],['drv_mft','max_frame_time'],
+   ['drv_fmt','flush_max_time']].forEach(([id, k]) => { sfv(id, dr[k]); });
+
+  const ld = d.listen_driver;
+  if (ld) {
+    sv('lis_type', ld.type || 'tcp'); onLisType();
+    if (ld.type === 'usb') { sv('lis_sport', ld.port); sv('lis_baud', ld.baudrate); }
+    else { sv('lis_host', ld.host); sv('lis_port', ld.port); }
+  }
+
+  const bus = d.bus || {};
+  if (bus.offline_time != null) $('bus_ot').value = bus.offline_time;
+
+  $('dev-list').innerHTML=''; devCount=0;
+  (d.devices||[]).forEach(dev=>addDevice(dev));
+}
+
+async function loadConfig(){
+  try{
+    const r=await fetch('/api/config');
+    const d=await r.json();
+    if(d.yaml_content && typeof jsyaml !== 'undefined'){
+      $('raw-yaml').value=d.yaml_content;
+      const parsed=jsyaml.load(d.yaml_content);
+      populateForm(parsed);
+      st('設定檔載入完成','ok');
+    }
+  }catch(e){ st('載入失敗：'+e,'err'); }
+}
+
+async function saveConfig() {
+  if(typeof jsyaml === 'undefined') { alert("解析庫尚未載入，無法儲存"); return false; }
+  let yaml_str;
+  const isRawMode = document.getElementById('raw-wrap').classList.contains('show');
+
+  if (isRawMode) {
+      yaml_str = document.getElementById('raw-yaml').value.trim();
+      if (!yaml_str) { st('Raw 內容不能為空', 'err'); return false; }
+  } else {
+      try { yaml_str = jsyaml.dump(buildData(), {lineWidth:120, quotingType:'"', noCompatMode:true}); }
+      catch(e) { st('表單資料有誤：'+e, 'err'); return false; }
+  }
+
+  setLoading('b-save', true);
+  try {
+      const r = await fetch('/api/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({yaml_content: yaml_str})
+      });
+      const res = await r.json();
+      if (res.status === 'ok') {
+          st('儲存成功，舊檔已備份', 'ok');
+          $('raw-yaml').value = yaml_str;
+          rawConfigObj = jsyaml.load(yaml_str);
+          return true;
+      } else {
+          st('儲存失敗：' + res.msg, 'err'); return false;
+      }
+  } catch(e) {
+      st('網路錯誤：' + e, 'err'); return false;
+  } finally { setLoading('b-save', false); }
+}
+
+async function restoreConfig(){
+  if(!confirm('確定還原上一版設定檔？')) return;
+  setLoading('b-restore',true);
+  try{
+    const r=await fetch('/api/restore',{method:'POST'});
+    const res=await r.json();
+    if(res.status==='ok'){ st('還原成功','ok'); await loadConfig(); }
+    else st('還原失敗：'+res.msg,'err');
+  }catch(e){ st('網路錯誤：'+e,'err'); }
+  finally{ setLoading('b-restore',false); }
+}
+
+async function restartSystem(){
+  const saved=await saveConfig();
+  if(!saved) return;
+  if(!confirm('確定重啟服務？MQTT 將中斷約 5 秒。')) return;
+  setLoading('b-restart',true);
+  st('SIGTERM 已發送，等待重啟...', 'info');
+  try{ await fetch('/api/restart',{method:'POST'}); setTimeout(()=>location.reload(),5500); }
+  catch(e){ st('重啟失敗：'+e,'err'); setLoading('b-restart',false); }
+}
+
+/* 🚨 升級：Sniffer 相關視覺邏輯 */
+function updateCrcState() {
+  const el = document.getElementById('crc-state');
+  if (document.getElementById('sniff-crc').checked) {
+    el.textContent = '已啟用';
+    el.className = 'badge-on';
+  } else {
+    el.textContent = '已關閉';
+    el.className = 'badge-off';
+  }
+}
+
+async function checkSnifferMode() {
+    try {
+        const r = await fetch('/api/sniffer/status');
+        const d = await r.json();
+        if (d.active) {
+            document.getElementById('s-sniff').style.display = '';
+            st('⚠️ 系統已進入 Sniffer 偵錯模式，主動輪詢與監聽已暫停！', 'wn');
+            
+            // 🚨 修正 3：防呆設計，強制關閉並鎖死 Monitor 區塊
+            const monAuto = document.getElementById('mon-auto');
+            if (monAuto.checked) monAuto.click(); // 若自動刷新開著，強制關閉
+            
+            const monSec = document.getElementById('s-monitor');
+            monSec.style.opacity = '0.4';           // 視覺變暗
+            monSec.style.pointerEvents = 'none';    // 滑鼠無法點擊
+        }
+    } catch(e) {}
+}
+
+async function sniffSend() {
+    const hexInput = document.getElementById('sniff-hex').value;
+    const autoCrc = document.getElementById('sniff-crc').checked;
+    const respArea = document.getElementById('sniff-resp');
+    const sendBtn = document.querySelector('#s-sniff .btn-w'); // 抓取發送按鈕
+
+    if (!hexInput || sendBtn.disabled) return;
+
+    // 🚨 修正 1：鎖定按鈕防連發 (解決 Race Condition)
+    sendBtn.disabled = true;
+    sendBtn.textContent = '⏳...';
+
+    // 🚨 修正 2：極簡 XSS 防護，將危險符號轉義
+    const safe = str => String(str).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+
+    const pendingMsg = `<div class="log-sys">[TX] ${safe(hexInput)}${autoCrc ? ' (+CRC)' : ''} ... 等待回應</div>`;
+    sniffHistory.unshift(pendingMsg);
+    if (sniffHistory.length > 20) sniffHistory.pop();
+    respArea.innerHTML = sniffHistory.join('');
+
+    try {
+        const r = await fetch('/api/sniffer/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({hex: hexInput, auto_crc: autoCrc})
+        });
+        const d = await r.json();
+
+        if (d.status === 'ok') {
+            sniffHistory[0] = `<div class="log-tx">[TX] ${safe(d.tx_hex)}</div>`;
+            sniffHistory.unshift(`<div class="log-rx">[RX] ${safe(d.response)}</div>`);
+        } else {
+            // 發生錯誤時直接覆蓋掉原本的 pending 訊息，避免畫面太亂
+            sniffHistory[0] = `<div class="log-err">[錯誤] ${safe(d.msg)}</div>`; 
+        }
+    } catch(e) {
+        sniffHistory[0] = `<div class="log-err">[網路錯誤] ${safe(e)}</div>`;
+    } finally {
+        respArea.innerHTML = sniffHistory.join('');
+        // 🚨 解除鎖定
+        sendBtn.disabled = false;
+        sendBtn.textContent = '▶ 發送';
+    }
+}
+
+/* 🚨 升級：即時側錄相關視覺邏輯 */
+let monitorInterval = null;
+
+// 解析封包字串，並替換為帶顏色的 HTML 標籤 (加上安全跳脫)
+function colorizeLog(rawText) {
+    if (!rawText) return '<span style="color:var(--mu)">尚無封包記錄...</span>';
+    
+    // 🚨 預防性防禦：安全跳脫函數，擋掉所有潛在的 HTML 標籤與危險符號
+    const safe = str => String(str).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c] || c));
+
+    const lines = rawText.split('\n');
+    const htmlLines = lines.map(line => {
+        const safeLine = safe(line); // 先過濾再塞入 div
+        if (safeLine.includes('[TX]')) return `<div class="log-tx">${safeLine}</div>`;
+        if (safeLine.includes('[RX]')) return `<div class="log-rx">${safeLine}</div>`;
+        if (safeLine.includes('Error') || safeLine.includes('Timeout')) return `<div class="log-err">${safeLine}</div>`;
+        return `<div>${safeLine}</div>`;
+    });
+    return htmlLines.join('');
+}
+
+async function fetchTraffic() {
+    try {
+        const r = await fetch('/api/traffic');
+        const d = await r.json();
+        if (d.status === 'ok') {
+            document.getElementById('mon-resp').innerHTML = colorizeLog(d.log);
+        }
+    } catch(e) {
+        console.error("側錄抓取失敗", e);
+    }
+}
+
+function toggleMonitor() {
+    const isAuto = document.getElementById('mon-auto').checked;
+    const stateEl = document.getElementById('mon-state');
+    
+    if (isAuto) {
+        stateEl.textContent = '自動更新中...';
+        stateEl.className = 'badge-on';
+        fetchTraffic(); 
+        monitorInterval = setInterval(fetchTraffic, 1000); 
+    } else {
+        stateEl.textContent = '已停止';
+        stateEl.className = 'badge-off';
+        clearInterval(monitorInterval);
+    }
+}
+
+// 🚨 設備隔離告警：地圖檔／Adapter 有問題的設備不會掛載，但網關仍在跑，
+//    若不在此明示，操作者會以為設定改成功了。
+function esc(s){ return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function checkQuarantine() {
+    const el = document.getElementById('qbanner');
+    if (!el) return;
+    try {
+        const r = await fetch('/api/quarantine');
+        if (!r.ok) return;
+        const res = await r.json();
+        if (!res.count) { el.className = 'qbanner'; el.innerHTML = ''; return; }
+
+        let h = `<h4>🚨 設定有誤：${res.count} 台設備未能掛載，已隔離</h4><ul>`;
+        for (const q of res.items) {
+            h += `<li><code>UID=${esc(q.uid)}</code> `
+               + `profile=<code>${esc(q.profile)}</code><br>${esc(q.reason)}</li>`;
+        }
+        h += `</ul><div class="qhint">修正下方設定或對應的地圖檔後，按右上角 `
+           + `<b>💾 儲存</b> 再按 <b>⟳ 重啟</b>。其餘設備目前運作正常。</div>`;
+        el.innerHTML = h;
+        el.className = 'qbanner show';
+    } catch (e) { /* 告警查詢失敗不得影響主畫面 */ }
+}
+
+function waitAndLoad(retry) {
+    if (typeof jsyaml !== 'undefined') {
+        loadConfig();
+        checkQuarantine();
+        setTimeout(checkSnifferMode, 500);
+    } else if (retry > 0) {
+        setTimeout(() => waitAndLoad(retry - 1), 150);
+    } else {
+        st('JS 解析庫載入失敗，請檢查網路或放置 js-yaml.min.js 至 profile 目錄', 'err');
+    }
+}
+waitAndLoad(20);
+
+</script>
+</body></html>

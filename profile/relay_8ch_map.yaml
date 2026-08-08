@@ -1,0 +1,129 @@
+# =======================================================
+# 檔名: relay_8ch_map.yaml
+# 設備: 8-Channel Relay (相容 Edge Gateway V3.9)
+# =======================================================
+
+# ---------------------------------------------------------
+# 1. 讀取指令 (輪詢現有開關狀態)
+# ---------------------------------------------------------
+read_commands:
+  - id: "read_coils"
+    fc: 1
+    start_addr: 0
+    count: 8
+    response_len: 6
+
+# ---------------------------------------------------------
+# 2. 後端解碼器 (提取封包數值) - 全面改用 ON / OFF
+# ---------------------------------------------------------
+sensors:
+  - key: "relay_status_byte"
+    command_id: "read_coils"
+    offset: 3
+    length: 1
+    bits:
+      - {bit: 0, id: "switch_0", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "switch_1", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "switch_2", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "switch_3", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "switch_4", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "switch_5", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "switch_6", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "switch_7", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+# ---------------------------------------------------------
+# 3. 後端編碼器 (定義控制寫入邏輯)
+# ---------------------------------------------------------
+settings:
+  0x0000: {key: "switch_0", write_fc: 5}
+  0x0001: {key: "switch_1", write_fc: 5}
+  0x0002: {key: "switch_2", write_fc: 5}
+  0x0003: {key: "switch_3", write_fc: 5}
+  0x0004: {key: "switch_4", write_fc: 5}
+  0x0005: {key: "switch_5", write_fc: 5}
+  0x0006: {key: "switch_6", write_fc: 5}
+  0x0007: {key: "switch_7", write_fc: 5}
+
+# ---------------------------------------------------------
+# 4. 前端發言人 (發送給 HA 的 UI 卡片設定) - 全面對齊 ON / OFF
+# ---------------------------------------------------------
+B1_INFO:
+  - key: "switch_0"
+    name: "繼電器 CH1"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_1"
+    name: "繼電器 CH2"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_2"
+    name: "繼電器 CH3"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_3"
+    name: "繼電器 CH4"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_4"
+    name: "繼電器 CH5"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_5"
+    name: "繼電器 CH6"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_6"
+    name: "繼電器 CH7"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"
+
+  - key: "switch_7"
+    name: "繼電器 CH8"
+    ha:
+      type: "switch"
+      icon: "mdi:toggle-switch"
+      payload_on: "ON"
+      payload_off: "OFF"
+      state_on: "ON"
+      state_off: "OFF"

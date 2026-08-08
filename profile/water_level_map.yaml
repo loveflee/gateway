@@ -1,0 +1,37 @@
+# =======================================================
+# 檔名: water_level_map.yaml
+# =======================================================
+read_commands:
+  - id: "read_analog"
+    fc: 3
+    start_addr: 0
+    count: 2
+    response_len: 9
+
+sensors:
+  # Gateway 端不做任何運算，原汁原味提取 2 Bytes 丟給 MQTT
+  - key: "water_level_raw"
+    command_id: "read_analog"
+    offset: 3
+    length: 2
+    datatype: "uint16"
+    scale: 1.0
+
+B1_INFO:
+  - key: "water_level_raw"
+    name: "水位-百分比"
+    unit: "%"
+    ha:
+      type: "sensor"
+      device_class: "moisture"
+      state_class: "measurement"
+      icon: "mdi:water-percent"
+      # 👇 直接把公式寫給 HA，Gateway 發布時會把這段送進 Discovery
+      value_template: >-
+        {% set x = value_json.water_level_raw | int %}
+        {% set dec = (x // 10000) %}
+        {% set val = (x % 10000) %}
+        {% set volts = val * (10 ** -dec) %}
+        {% set ma = (volts / 249.0) * 1000.0 %}
+        {% set pct = (ma - 4.0) / 16.0 * 100.0 %}
+        {{ iif(pct < 0, 0, iif(pct > 100, 100, pct)) | round(1) }}

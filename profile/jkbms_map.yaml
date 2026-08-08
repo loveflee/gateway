@@ -1,0 +1,430 @@
+# =============================================================================
+# jkbms_ha_map.yaml - V3.3.0 真・工控完全體版 (Industrial Production Ready)
+# 適用：IronGate Gateway V3.9+ / jkbms_adapter.py V5.3+
+# 鐵律：不刪減任何原廠參數；補齊所有警報 (Alarms)、允許狀態 (Enables) 與故障碼。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ⚠ 為何有 34 個 key 帶 re_ 前綴（2026-08 加入，勿隨意還原）
+#   這些實體曾經被誤標為 entity_category: config。HA 不允許唯讀 sensor/
+#   binary_sensor 使用 config 分類，實體建立失敗後在 HA 註冊表留下孤兒項目，
+#   永久佔住原本的 unique_id —— 刪裝置、重載 MQTT、清空 broker retained、
+#   重啟 HA 全部無效（已逐一驗證）。
+#   以全新 unique_id 發布可正常建立（探針實驗證實），故改用 re_ 前綴，
+#   並以 value_template 指回原始資料 key，資料來源與 adapter 輸出完全不變。
+# -----------------------------------------------------------------------------
+
+B1_INFO:
+  # ================= 電池核心即時數據 (主面板：V/A/W/SOC) =================
+  - key: "total_voltage"
+    name: "電池總電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "current"
+    name: "電池總電流"
+    unit: "A"
+    ha: { type: "sensor", device_class: "current", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "power_watts"
+    name: "總功率"
+    unit: "W"
+    ha: { type: "sensor", device_class: "power", state_class: "measurement", suggested_display_precision: 0 }
+  - key: "soc_percent"
+    name: "剩餘電量"
+    unit: "%"
+    ha: { type: "sensor", device_class: "battery", state_class: "measurement" }
+  - key: "remaining_capacity_ah"
+    name: "剩餘容量"
+    unit: "Ah"
+    ha: { type: "sensor", state_class: "measurement", suggested_display_precision: 3 }
+
+  # ================= 充放電狀態與實際允許機制 (Enables) =================
+  - key: "charge_status"
+    name: "充電狀態(電流)"
+    ha: { type: "binary_sensor", device_class: "battery_charging", payload_on: "ON", payload_off: "OFF" }
+  - key: "discharge_status"
+    name: "放電狀態(電流)"
+    ha: { type: "binary_sensor", device_class: "power", payload_on: "ON", payload_off: "OFF" }
+  # [必補] BMS 實際允許狀態 (對應 MOS 真實導通情形，非使用者設定值)
+  - key: "charge_enable"
+    name: "允許充電 (MOS狀態)"
+    ha: { type: "binary_sensor", device_class: "power", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "discharge_enable"
+    name: "允許放電 (MOS狀態)"
+    ha: { type: "binary_sensor", device_class: "power", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+
+  # ================= 故障與狀態碼總覽 (全局除錯用) =================
+  - key: "fault_code"
+    name: "故障碼 (Fault Code)"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "status_code"
+    name: "狀態碼 (Status Code)"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "soc_calibration_state"
+    name: "SOC 校準狀態"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+
+  # ================= 均衡核心觀測區 =================
+  - key: "balance_current"
+    name: "均衡電流"
+    unit: "mA"
+    ha: { type: "sensor", icon: "mdi:scale-balance", state_class: "measurement", entity_category: "diagnostic" }
+  - key: "balance_action"
+    name: "均衡動作模式"
+    ha: { type: "sensor", icon: "mdi:hammer-wrench", entity_category: "diagnostic" }
+
+  # ================= 動態估算與統計 =================
+  - key: "actual_capacity_ah"
+    name: "電池實際容量 (SOH)"
+    unit: "Ah"
+    ha: { type: "sensor", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cycle_count"
+    name: "循環次數"
+    unit: "N"
+    ha: { type: "sensor", icon: "mdi:battery-sync", state_class: "total_increasing" }
+  - key: "total_cycle_capacity"
+    name: "循環總容量"
+    unit: "Ah"
+    ha: { type: "sensor", state_class: "total_increasing", suggested_display_precision: 3 }
+  - key: "runtime_seconds"
+    name: "運行總時間"
+    unit: "s"   # ⚠ HA 的 device_class: duration 只接受小寫 s / min / h / d，大寫 S 會被判為無效實體
+    ha: { type: "sensor", device_class: "duration", state_class: "total_increasing" }
+
+  # ================= 溫度監控 =================
+  - key: "power_board_temp"
+    name: "功率板(MOS)溫度"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+  - key: "temp_sensor_1"
+    name: "電池溫度 1"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+  - key: "temp_sensor_2"
+    name: "電池溫度 2"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+  - key: "temp_sensor_3"
+    name: "電池溫度 3"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+  - key: "temp_sensor_4"
+    name: "電池溫度 4"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+  - key: "temp_sensor_5"
+    name: "電池溫度 5"
+    unit: "°C"
+    ha: { type: "sensor", device_class: "temperature", state_class: "measurement", suggested_display_precision: 1 }
+
+  # ================= 控制行為審計監聽 (0x10 Master Command) =================
+  # ⚠ 以下三項來自 0x10 主控指令幀，只有當「別的主站對 BMS 下寫入指令」時才會出現。
+  #   純旁路監聽 (mode: listen) 現場沒有主站在寫，adapter 永遠不會產出這三個 key，
+  #   實體會恆為「未知」。故予以註解保留 —— 若日後改為主動模式或現場加入其他主站，
+  #   直接取消註解即可恢復（adapter 的 BMS_MAP 0x10 區塊仍完整保留，無須改動）。
+  # - key: "target_slave_id"
+  #   name: "操作目標從機ID"
+  #   ha: { type: "sensor", icon: "mdi:target-variant", entity_category: "diagnostic" }
+  # - key: "register"
+  #   name: "操作寄存器"
+  #   ha: { type: "sensor", icon: "mdi:memory", entity_category: "diagnostic" }
+  # - key: "value_hex"
+  #   name: "指令數值"
+  #   ha: { type: "sensor", icon: "mdi:numeric", entity_category: "diagnostic" }
+
+  # ================= 單體電壓監控 (強制隔離至診斷區) =================
+  - key: "cell_01_voltage"
+    name: "單體 01 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_02_voltage"
+    name: "單體 02 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_03_voltage"
+    name: "單體 03 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_04_voltage"
+    name: "單體 04 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_05_voltage"
+    name: "單體 05 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_06_voltage"
+    name: "單體 06 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_07_voltage"
+    name: "單體 07 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_08_voltage"
+    name: "單體 08 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_09_voltage"
+    name: "單體 09 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_10_voltage"
+    name: "單體 10 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_11_voltage"
+    name: "單體 11 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_12_voltage"
+    name: "單體 12 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_13_voltage"
+    name: "單體 13 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_14_voltage"
+    name: "單體 14 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_15_voltage"
+    name: "單體 15 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "cell_16_voltage"
+    name: "單體 16 電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", state_class: "measurement", suggested_display_precision: 3 }
+  - key: "avg_voltage"
+    name: "平均電壓"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", suggested_display_precision: 3 }
+  - key: "max_diff_voltage"
+    name: "最大壓差"
+    unit: "V"
+    ha: { type: "sensor", device_class: "voltage", suggested_display_precision: 3 }
+  - key: "max_cell_index"
+    name: "最高壓單體號"
+    ha: { type: "sensor", icon: "mdi:format-list-numbered" }
+  - key: "min_cell_index"
+    name: "最低壓單體號"
+    ha: { type: "sensor", icon: "mdi:format-list-numbered" }
+
+  - key: "parallel_limiter_status"
+    name: "並聯限流模組狀態"
+    ha: { type: "binary_sensor", device_class: "power", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "alarm_bits_1"
+    name: "原始告警遮罩"
+    unit: "Hex"
+    ha: { type: "sensor", icon: "mdi:bug-outline", entity_category: "diagnostic" }
+  - key: "design_capacity"
+    name: "電池設計容量"
+    unit: "mAh"
+    ha: { type: "sensor", icon: "mdi:battery-heart-outline", state_class: "measurement", entity_category: "diagnostic" }
+
+B2_SETTING:
+  # ================= 1. 電壓保護參數 (純監聽回讀，全數診斷類別) =================
+  - key: "re_sleep_voltage"
+    name: "休眠電壓設定"
+    unit: "V"
+    ha: { value_template: "{{ value_json.sleep_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_cell_uvp"
+    name: "單體欠壓保護"
+    unit: "V"
+    ha: { value_template: "{{ value_json.cell_uvp }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_cell_uvp_recovery"
+    name: "單體欠壓恢復"
+    unit: "V"
+    ha: { value_template: "{{ value_json.cell_uvp_recovery }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_cell_ovp"
+    name: "單體過充保護"
+    unit: "V"
+    ha: { value_template: "{{ value_json.cell_ovp }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_cell_ovp_recovery"
+    name: "單體過充恢復"
+    unit: "V"
+    ha: { value_template: "{{ value_json.cell_ovp_recovery }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_balance_trigger_diff"
+    name: "觸發均衡壓差"
+    unit: "V"
+    ha: { value_template: "{{ value_json.balance_trigger_diff }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_soc_100_voltage"
+    name: "SOC-100%基準電壓"
+    unit: "V"
+    ha: { value_template: "{{ value_json.soc_100_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_soc_0_voltage"
+    name: "SOC-0%基準電壓"
+    unit: "V"
+    ha: { value_template: "{{ value_json.soc_0_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_rec_charge_voltage"
+    name: "推薦充電電壓"
+    unit: "V"
+    ha: { value_template: "{{ value_json.rec_charge_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_float_charge_voltage"
+    name: "浮充電壓設定"
+    unit: "V"
+    ha: { value_template: "{{ value_json.float_charge_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_auto_shutdown_voltage"
+    name: "自動關機電壓"
+    unit: "V"
+    ha: { value_template: "{{ value_json.auto_shutdown_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+  - key: "re_balance_start_voltage"
+    name: "均衡起始電壓"
+    unit: "V"
+    ha: { value_template: "{{ value_json.balance_start_voltage }}", type: "sensor", suggested_display_precision: 3, entity_category: "diagnostic" }
+
+  # ================= 2. 電流與開關設定 =================
+  - key: "re_cont_charge_current"
+    name: "最大充電電流設定"
+    unit: "A"
+    ha: { value_template: "{{ value_json.cont_charge_current }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_cont_discharge_current"
+    name: "最大放電電流設定"
+    unit: "A"
+    ha: { value_template: "{{ value_json.cont_discharge_current }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_max_balance_current"
+    name: "最大均衡電流設定"
+    unit: "mA"
+    ha: { value_template: "{{ value_json.max_balance_current }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_charge_switch"
+    name: "充電開關(人為設定)"
+    ha: { value_template: "{{ value_json.charge_switch }}", type: "binary_sensor", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "re_discharge_switch"
+    name: "放電開關(人為設定)"
+    ha: { value_template: "{{ value_json.discharge_switch }}", type: "binary_sensor", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "re_balance_switch"
+    name: "均衡開關(人為設定)"
+    ha: { value_template: "{{ value_json.balance_switch }}", type: "binary_sensor", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+
+  # ================= 3. 溫度保護設定 =================
+  - key: "re_charge_otp"
+    name: "充電過溫保護值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.charge_otp }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_charge_otp_recovery"
+    name: "充電過溫恢復值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.charge_otp_recovery }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_discharge_otp"
+    name: "放電過溫保護值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.discharge_otp }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_discharge_otp_recovery"
+    name: "放電過溫恢復值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.discharge_otp_recovery }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_charge_utp"
+    name: "充電低溫保護值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.charge_utp }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_charge_utp_recovery"
+    name: "充電低溫恢復值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.charge_utp_recovery }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_mos_otp"
+    name: "MOS過溫保護值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.mos_otp }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+  - key: "re_mos_otp_recovery"
+    name: "MOS過溫恢復值"
+    unit: "°C"
+    ha: { value_template: "{{ value_json.mos_otp_recovery }}", type: "sensor", suggested_display_precision: 1, entity_category: "diagnostic" }
+
+  # ================= 4. 保護延遲與解除設定閾值 (Thresholds) =================
+  - key: "re_charge_ocp_delay"
+    name: "充電過流保護延遲"
+    unit: "S"
+    ha: { value_template: "{{ value_json.charge_ocp_delay }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_charge_ocp_release"
+    name: "充電過流保護解除"
+    unit: "S"
+    ha: { value_template: "{{ value_json.charge_ocp_release }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_discharge_ocp_delay"
+    name: "放電過流保護延遲"
+    unit: "S"
+    ha: { value_template: "{{ value_json.discharge_ocp_delay }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_discharge_ocp_release"
+    name: "放電過流保護解除"
+    unit: "S"
+    ha: { value_template: "{{ value_json.discharge_ocp_release }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_sc_delay"
+    name: "短路保護延遲"
+    unit: "us"
+    ha: { value_template: "{{ value_json.sc_delay }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "re_sc_release"
+    name: "短路保護解除時間"
+    unit: "S"
+    ha: { value_template: "{{ value_json.sc_release }}", type: "sensor", entity_category: "diagnostic" }
+
+  # ================= 5. 保護解除執行計時 (Timers) =================
+  - key: "discharge_ocp_release_time"
+    name: "放電過流解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "discharge_sc_release_time"
+    name: "放電短路解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "charge_ocp_release_time"
+    name: "充電過流解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "charge_sc_release_time"
+    name: "充電短路解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "cell_uvp_release_time"
+    name: "單體欠壓解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "cell_ovp_release_time"
+    name: "單體過壓解除計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+
+  # ================= 6. 系統與時間設定 =================
+  - key: "re_cell_count"
+    name: "設備單體串數設定"
+    ha: { value_template: "{{ value_json.cell_count }}", type: "sensor", icon: "mdi:counter", entity_category: "diagnostic" }
+  - key: "re_smart_sleep_time"
+    name: "智能休眠時間設定"
+    unit: "H"
+    ha: { value_template: "{{ value_json.smart_sleep_time }}", type: "sensor", entity_category: "diagnostic" }
+  - key: "emergency_switch_time"
+    name: "應急開關計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+  - key: "sleep_time_seconds"
+    name: "進入休眠倒計時"
+    unit: "S"
+    ha: { type: "sensor", entity_category: "diagnostic" }
+
+  # ================= 7. 物理封存欄位 =================
+  - key: "device_address"
+    name: "設備物理位址"
+    ha: { type: "sensor", enabled_by_default: false, entity_category: "diagnostic" }
+
+B3_STATUS_BITS:
+  # ================= 全局硬體保護告警 (Alarms - 必補) =================
+  - key: "cell_ovp_alarm"
+    name: "單體過壓保護 (OVP)"
+    ha: { type: "binary_sensor", device_class: "problem", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "cell_uvp_alarm"
+    name: "單體欠壓保護 (UVP)"
+    ha: { type: "binary_sensor", device_class: "problem", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "charge_ocp_alarm"
+    name: "充電過流保護 (OCP)"
+    ha: { type: "binary_sensor", device_class: "problem", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "discharge_ocp_alarm"
+    name: "放電過流保護 (OCP)"
+    ha: { type: "binary_sensor", device_class: "problem", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "charge_otp_alarm"
+    name: "充電過溫保護 (OTP)"
+    ha: { type: "binary_sensor", device_class: "heat", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "mos_otp_alarm"
+    name: "MOS過溫保護 (OTP)"
+    ha: { type: "binary_sensor", device_class: "heat", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }
+  - key: "short_circuit_alarm"
+    name: "短路保護 (SC)"
+    ha: { type: "binary_sensor", device_class: "problem", payload_on: "ON", payload_off: "OFF", entity_category: "diagnostic" }

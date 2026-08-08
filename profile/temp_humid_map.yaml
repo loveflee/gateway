@@ -1,0 +1,41 @@
+# =======================================================
+# 檔名: temp_humid_map.yaml
+# =======================================================
+read_commands:
+  - id: "read_th"
+    fc: 3
+    start_addr: 0
+    count: 2
+    response_len: 9
+
+sensors:
+  - key: "humidity"
+    command_id: "read_th"
+    offset: 3         # 回傳封包的第 3,4 byte
+    length: 2
+    datatype: "uint16"
+    scale: 10.0       # 原始值 / 10
+
+  - key: "temperature"
+    command_id: "read_th"
+    offset: 5         # 回傳封包的第 5,6 byte
+    length: 2
+    datatype: "uint16"
+    scale: 10.0       # 原始值 / 10
+
+B1_INFO:
+  - key: "humidity"
+    name: "環境濕度"
+    unit: "%"
+    ha:
+      type: "sensor"
+      device_class: "humidity"
+      state_class: "measurement"
+
+  - key: "temperature"
+    name: "環境溫度"
+    unit: "°C"
+    ha:
+      type: "sensor"
+      device_class: "temperature"
+      state_class: "measurement"

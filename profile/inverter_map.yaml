@@ -1,0 +1,377 @@
+# =======================================================
+# IronGate V3.9 Device Profile: Generic Inverter (魔王級範例)
+# 架構：前端 UI (B1/B2/B3) 與 後端解碼 (Sensors/Settings) 完全解耦
+# =======================================================
+
+device_info:
+  manufacturer: "Generic"
+  model: "Inverter V3.9"
+
+# -------------------------------------------------------
+# [1] 讀取指令區塊 (Read Commands)
+# -------------------------------------------------------
+read_commands:
+  - id: "read_realtime"
+    fc: 4
+    start_addr: 0x3000
+    count: 22
+    response_len: 49
+  - id: "read_params"
+    fc: 3
+    start_addr: 0x4000
+    count: 28
+    response_len: 61
+  - id: "read_alarms"
+    fc: 2
+    start_addr: 0x5000
+    count: 29
+    response_len: 9
+
+# -------------------------------------------------------
+# [2] 定義與翻譯 (Definitions) - 供後端反向查表用
+# -------------------------------------------------------
+definitions:
+  value_maps:
+    map_work_status:
+      0: "等待狀態"
+      1: "市電狀態"
+      2: "逆變狀態"
+      3: "關機狀態"
+    map_work_mode:
+      1: "市電優先"
+      2: "節能"
+      3: "逆變優先"
+    map_combined_mode:
+      0: "單機模式"
+      1: "控制器模式"
+      2: "MPPT模式"
+
+# -------------------------------------------------------
+# [3] 後端解碼器 (Sensors) - 只負責數學運算與封包切割
+# -------------------------------------------------------
+sensors:
+  # --- 3000 區 (即時數據) ---
+  - {key: "input_voltage", command_id: "read_realtime", offset: 3, length: 2, scale: 10}
+  - {key: "output_voltage", command_id: "read_realtime", offset: 5, length: 2, scale: 10}
+  - {key: "battery_voltage", command_id: "read_realtime", offset: 7, length: 2, scale: 10}
+  - {key: "load_current", command_id: "read_realtime", offset: 9, length: 2}
+  - {key: "load_percent", command_id: "read_realtime", offset: 11, length: 2}
+  - {key: "load_power", command_id: "read_realtime", offset: 13, length: 2}
+  - {key: "charge_current", command_id: "read_realtime", offset: 15, length: 2}
+  - {key: "bridge_peak_current", command_id: "read_realtime", offset: 17, length: 2}
+  - {key: "input_freq", command_id: "read_realtime", offset: 19, length: 2, scale: 10}
+  - {key: "temperature", command_id: "read_realtime", offset: 21, length: 2}
+  - {key: "work_status", command_id: "read_realtime", offset: 23, length: 2, map_profile: "map_work_status"}
+  - {key: "charge_pwm", command_id: "read_realtime", offset: 25, length: 2}
+  - {key: "output_mod", command_id: "read_realtime", offset: 27, length: 2}
+  - {key: "output_peak", command_id: "read_realtime", offset: 29, length: 2}
+  - {key: "mppt_batt_voltage", command_id: "read_realtime", offset: 31, length: 2, scale: 10}
+  - {key: "pv2_voltage", command_id: "read_realtime", offset: 33, length: 2, scale: 10}
+  - {key: "pv1_charge_current", command_id: "read_realtime", offset: 35, length: 2}
+  - {key: "pv2_charge_current", command_id: "read_realtime", offset: 37, length: 2}
+  - {key: "pv1_voltage", command_id: "read_realtime", offset: 39, length: 2, scale: 10}
+  - {key: "pv_total_energy", command_id: "read_realtime", offset: 41, length: 2}
+  - {key: "discharge_current", command_id: "read_realtime", offset: 43, length: 2}
+  - {key: "max_charge_current", command_id: "read_realtime", offset: 45, length: 2}
+
+  # --- 4000 區 (參數回讀 Feedback) ---
+  - {key: "work_mode_state", command_id: "read_params", offset: 3, length: 2, map_profile: "map_work_mode"}
+  - {key: "freq_set_fb", command_id: "read_params", offset: 11, length: 2}
+  - {key: "out_voltage_set_fb", command_id: "read_params", offset: 13, length: 2}
+  - {key: "batt_count_fb", command_id: "read_params", offset: 15, length: 2}
+  - {key: "cell_voltage_set_fb", command_id: "read_params", offset: 17, length: 2, scale: 10.0}
+  - {key: "cell_equalize_fb", command_id: "read_params", offset: 19, length: 2, scale: 10.0}
+  - {key: "cell_float_fb", command_id: "read_params", offset: 21, length: 2, scale: 10.0}
+  - {key: "batt_high_protect_fb", command_id: "read_params", offset: 23, length: 2, scale: 10.0}
+  - {key: "batt_high_alarm_fb", command_id: "read_params", offset: 25, length: 2, scale: 10.0}
+  - {key: "batt_high_recover_fb", command_id: "read_params", offset: 27, length: 2, scale: 10.0}
+  - {key: "batt_low_protect_fb", command_id: "read_params", offset: 29, length: 2, scale: 10.0}
+  - {key: "batt_low_alarm_fb", command_id: "read_params", offset: 31, length: 2, scale: 10.0}
+  - {key: "batt_low_recover_fb", command_id: "read_params", offset: 33, length: 2, scale: 10.0}
+  - {key: "batt_low_resume_fb", command_id: "read_params", offset: 35, length: 2, scale: 10.0}
+  - {key: "batt_low_recoverable_fb", command_id: "read_params", offset: 37, length: 2, scale: 10.0}
+  - {key: "inv_to_inv_batt_fb", command_id: "read_params", offset: 39, length: 2, scale: 10.0}
+  - {key: "inv_to_grid_batt_fb", command_id: "read_params", offset: 41, length: 2, scale: 10.0}
+  - {key: "input_v_factor_fb", command_id: "read_params", offset: 43, length: 2, scale: 10.0}
+  - {key: "output_v_factor_fb", command_id: "read_params", offset: 45, length: 2}
+  - {key: "batt_v_factor_fb", command_id: "read_params", offset: 47, length: 2}
+  - {key: "load_i_factor_fb", command_id: "read_params", offset: 49, length: 2}
+  - {key: "charge_level_state", command_id: "read_params", offset: 51, length: 2}
+  - {key: "combined_mode_fb", command_id: "read_params", offset: 55, length: 2, map_profile: "map_combined_mode"}
+  - {key: "remote_switch_fb", command_id: "read_params", offset: 57, length: 2}
+
+  # --- 5000 區 (Alarm Bits 解碼) ---
+  # 讓解析出來的 JSON 值直接變成 "ON" / "OFF"，完美對接 HA
+  - key: "alarm_byte_0"
+    command_id: "read_alarms"
+    offset: 3
+    length: 1
+    bits:
+      - {bit: 0, id: "input_freq_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "ref_volt_state", ha: {payload_on: "OFF", payload_off: "ON"}} # 反向邏輯
+      - {bit: 2, id: "transformer_rev", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "grid_high", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "grid_low", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "batt_high_prot", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "batt_high_alarm_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "batt_low_prot", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+  - key: "alarm_byte_1"
+    command_id: "read_alarms"
+    offset: 4
+    length: 1
+    bits:
+      - {bit: 0, id: "batt_low_alarm_status", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "overload_alarm", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "overload_shutdown", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "temp_high", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "ntc_missing", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "inv_fault", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "short_circuit", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+  - key: "alarm_byte_2"
+    command_id: "read_alarms"
+    offset: 5
+    length: 1
+    bits:
+      - {bit: 0, id: "pv1_high_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "pv1_low_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "ctrl_batt_high", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "ctrl_batt_low", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "ctrl_batt_temp_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "ctrl_temp_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "ctrl_load_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "ctrl_load_short", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+  - key: "alarm_byte_3"
+    command_id: "read_alarms"
+    offset: 6
+    length: 1
+    bits:
+      - {bit: 0, id: "ctrl_load_switch", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "ctrl1_mode", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "ctrl2_mode", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "pv2_high_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "pv2_low_state", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+# -------------------------------------------------------
+# [4] 後端編碼器 (Settings) - 只負責寫入位址、FC與反向Scale
+# -------------------------------------------------------
+settings:
+  0x4000: {key: "inverter_work_mode", write_fc: 6, link_sensor: "work_mode_state"}
+  0x4004: {key: "freq_set", write_fc: 6, scale: 1.0}
+  0x4005: {key: "out_voltage_set", write_fc: 6, scale: 1.0}
+  0x4006: {key: "batt_count", write_fc: 6, scale: 1.0}
+  0x4007: {key: "cell_voltage_set", write_fc: 6, scale: 10.0}
+  0x4008: {key: "cell_equalize", write_fc: 6, scale: 10.0}
+  0x4009: {key: "cell_float", write_fc: 6, scale: 10.0}
+  0x400A: {key: "batt_high_protect", write_fc: 6, scale: 10.0}
+  0x400B: {key: "batt_high_alarm", write_fc: 6, scale: 10.0}
+  0x400C: {key: "batt_high_recover", write_fc: 6, scale: 10.0}
+  0x400D: {key: "batt_low_protect", write_fc: 6, scale: 10.0}
+  0x400E: {key: "batt_low_alarm", write_fc: 6, scale: 10.0}
+  0x400F: {key: "batt_low_recover", write_fc: 6, scale: 10.0}
+  0x4010: {key: "batt_low_resume", write_fc: 6, scale: 10.0}
+  0x4011: {key: "batt_low_recoverable", write_fc: 6, scale: 10.0}
+  0x4012: {key: "inv_to_inv_batt", write_fc: 6, scale: 10.0}
+  0x4013: {key: "inv_to_grid_batt", write_fc: 6, scale: 10.0}
+  0x4018: {key: "charge_level", write_fc: 6, scale: 1.0}
+  0x4019: {key: "device_id", write_fc: 6, scale: 1.0}
+  0x401A: {key: "combined_mode", write_fc: 6, link_sensor: "combined_mode_fb"}
+  0x401B: {key: "remote_switch", write_fc: 6}
+
+# =======================================================
+# [5] 前端發言人 (HA UI 宣告區)
+# =======================================================
+
+# --- B1_INFO: 唯讀狀態與警報 ---
+B1_INFO:
+  # 即時數據
+  - {key: "input_voltage", name: "輸入電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "output_voltage", name: "輸出電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "battery_voltage", name: "電池電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "load_current", name: "負載電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "load_percent", name: "負載百分比", unit: "%", ha: {type: "sensor", icon: "mdi:chart-pie", state_class: "measurement"}}
+  - {key: "load_power", name: "負載功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "charge_current", name: "充電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "bridge_peak_current", name: "橋臂峰值電流", unit: "A", ha: {type: "sensor", icon: "mdi:current-ac"}}
+  - {key: "input_freq", name: "輸入頻率", unit: "Hz", ha: {type: "sensor", device_class: "frequency", state_class: "measurement"}}
+  - {key: "temperature", name: "機身溫度", unit: "°C", ha: {type: "sensor", device_class: "temperature", state_class: "measurement"}}
+  - {key: "work_status", name: "工作狀態", ha: {type: "sensor", icon: "mdi:state-machine"}}
+  - {key: "charge_pwm", name: "充電占空比值", unit: "%", ha: {type: "sensor", icon: "mdi:percent"}}
+  - {key: "output_mod", name: "輸出電壓調制度值", ha: {type: "sensor", icon: "mdi:sine-wave"}}
+  - {key: "output_peak", name: "輸出電壓峰值", ha: {type: "sensor", icon: "mdi:chart-bell-curve"}}
+  - {key: "mppt_batt_voltage", name: "MPPT電池電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "pv2_voltage", name: "PV2電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "pv1_charge_current", name: "PV1充電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "pv2_charge_current", name: "PV2充電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "pv1_voltage", name: "PV1電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "pv_total_energy", name: "PV累計發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "discharge_current", name: "放電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "max_charge_current", name: "機器最大充電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+
+  # 參數回饋 (Feedback) - 當作唯讀感測器顯示
+  - {key: "work_mode_state", name: "工作模式狀態(FB)", ha: {type: "sensor", icon: "mdi:eye", entity_category: "diagnostic"}}
+  - {key: "freq_set_fb", name: "頻率設定(FB)", unit: "Hz", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "out_voltage_set_fb", name: "輸出電壓設定(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_count_fb", name: "電池節數(FB)", unit: "節", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "cell_voltage_set_fb", name: "單節電池電壓(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "cell_equalize_fb", name: "單節均充(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "cell_float_fb", name: "單節浮充(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_high_protect_fb", name: "電池高壓保護(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_high_alarm_fb", name: "電池高壓報警(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_high_recover_fb", name: "電池高壓恢復(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_low_protect_fb", name: "電池低壓保護(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_low_alarm_fb", name: "電池低壓報警(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_low_recover_fb", name: "電池低壓恢復(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_low_resume_fb", name: "電池低壓復歸(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_low_recoverable_fb", name: "電池低壓可恢復(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "inv_to_inv_batt_fb", name: "逆變轉逆變電池(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "inv_to_grid_batt_fb", name: "逆變轉市電電池(FB)", unit: "V", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "input_v_factor_fb", name: "輸入電壓係數(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "output_v_factor_fb", name: "輸出電壓係數(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "batt_v_factor_fb", name: "電池電壓係數(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "load_i_factor_fb", name: "負載電流係數(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "charge_level_state", name: "充電檔位狀態(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "combined_mode_fb", name: "一體機模式(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "remote_switch_fb", name: "遠程開關(FB)", ha: {type: "sensor", entity_category: "diagnostic"}}
+
+# --- B3_STATUS_BITS: 警報位元 ---
+B3_STATUS_BITS:
+  input_freq_state: {name: "輸入頻率異常", ha: {type: "binary_sensor", device_class: "problem"}}
+  ref_volt_state: {name: "參考基准電壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  transformer_rev: {name: "變壓器反接", ha: {type: "binary_sensor", device_class: "problem"}}
+  grid_high: {name: "市電高壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  grid_low: {name: "市電低壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  batt_high_prot: {name: "電池高壓保護", ha: {type: "binary_sensor", device_class: "problem"}}
+  batt_high_alarm_state: {name: "電池高壓報警狀態", ha: {type: "binary_sensor", device_class: "problem"}}
+  batt_low_prot: {name: "電池低壓保護", ha: {type: "binary_sensor", device_class: "problem"}}
+  batt_low_alarm_status: {name: "電池低壓報警", ha: {type: "binary_sensor", device_class: "problem"}}
+  overload_alarm: {name: "過載報警", ha: {type: "binary_sensor", device_class: "problem"}}
+  overload_shutdown: {name: "過載關機", ha: {type: "binary_sensor", device_class: "problem"}}
+  temp_high: {name: "機身過熱", ha: {type: "binary_sensor", device_class: "heat"}}
+  ntc_missing: {name: "NTC未接", ha: {type: "binary_sensor", device_class: "problem"}}
+  inv_fault: {name: "逆變器故障", ha: {type: "binary_sensor", device_class: "problem"}}
+  short_circuit: {name: "短路故障", ha: {type: "binary_sensor", device_class: "problem"}}
+  pv1_high_state: {name: "PV1高壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  pv1_low_state: {name: "PV1低壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_batt_high: {name: "控制器電池高壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_batt_low: {name: "控制器電池低壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_batt_temp_state: {name: "控制器電池溫度", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_temp_state: {name: "控制器溫度", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_load_state: {name: "控制器負載", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_load_short: {name: "控制器負載短路", ha: {type: "binary_sensor", device_class: "problem"}}
+  ctrl_load_switch: {name: "控制器負載開關", ha: {type: "binary_sensor", device_class: "power"}}
+  ctrl1_mode: {name: "控制器1模式", ha: {type: "binary_sensor", icon: "mdi:solar-power"}}
+  ctrl2_mode: {name: "控制器2模式", ha: {type: "binary_sensor", icon: "mdi:solar-power"}}
+  pv2_high_state: {name: "PV2高壓", ha: {type: "binary_sensor", device_class: "problem"}}
+  pv2_low_state: {name: "PV2低壓", ha: {type: "binary_sensor", device_class: "problem"}}
+
+# --- B2_SETTING: 控制下發區 (雙向狀態解耦) ---
+B2_SETTING:
+  - key: "inverter_work_mode"
+    name: "工作模式設定"
+    ha:
+      type: "select"
+      options: ["市電優先", "節能", "逆變優先"]
+      icon: "mdi:power-settings"
+      state_key: "work_mode_state" # 寫入設定，但 UI 聽從回報
+
+  - key: "freq_set"
+    name: "頻率值設置"
+    ha: {type: "number", min: 50, max: 60, mode: "slider", state_key: "freq_set_fb"}
+
+  - key: "out_voltage_set"
+    name: "輸出電壓設置"
+    ha: {type: "number", min: 200, max: 240, mode: "slider", state_key: "out_voltage_set_fb"}
+
+  - key: "batt_count"
+    name: "電池節數設置"
+    ha: {type: "number", min: 1, max: 8, mode: "box", state_key: "batt_count_fb"}
+
+  - key: "cell_voltage_set"
+    name: "單節電池電壓設置"
+    ha: {type: "number", min: 10, max: 16, mode: "box", state_key: "cell_voltage_set_fb"}
+
+  - key: "cell_equalize"
+    name: "單節電池均充值"
+    ha: {type: "number", min: 10, max: 16, mode: "box", state_key: "cell_equalize_fb"}
+
+  - key: "cell_float"
+    name: "單節電池浮充值"
+    ha: {type: "number", min: 10, max: 16, mode: "box", state_key: "cell_float_fb"}
+
+  - key: "batt_high_protect"
+    name: "電池高壓保護值"
+    ha: {type: "number", min: 10, max: 20, mode: "box", state_key: "batt_high_protect_fb"}
+
+  - key: "batt_high_alarm"
+    name: "電池高壓報警"
+    ha: {type: "number", min: 10, max: 20, mode: "box", state_key: "batt_high_alarm_fb"}
+
+  - key: "batt_high_recover"
+    name: "電池高壓報警恢復值"
+    ha: {type: "number", min: 10, max: 20, mode: "box", state_key: "batt_high_recover_fb"}
+
+  - key: "batt_low_protect"
+    name: "電池低壓保護值"
+    ha: {type: "number", min: 8, max: 15, mode: "box", state_key: "batt_low_protect_fb"}
+
+  - key: "batt_low_alarm"
+    name: "電池低壓報警值"
+    ha: {type: "number", min: 8, max: 15, mode: "box", state_key: "batt_low_alarm_fb"}
+
+  - key: "batt_low_recover"
+    name: "電池低壓報警恢復值"
+    ha: {type: "number", min: 8, max: 15, mode: "box", state_key: "batt_low_recover_fb"}
+
+  - key: "batt_low_resume"
+    name: "電池低壓恢復值"
+    ha: {type: "number", min: 8, max: 15, mode: "box", state_key: "batt_low_resume_fb"}
+
+  - key: "batt_low_recoverable"
+    name: "電池低壓可恢復"
+    ha: {type: "number", min: 8, max: 15, mode: "box", state_key: "batt_low_recoverable_fb"}
+
+  - key: "inv_to_inv_batt"
+    name: "逆變優先轉逆變供電電池值"
+    ha: {type: "number", min: 10, max: 16, mode: "box", state_key: "inv_to_inv_batt_fb"}
+
+  - key: "inv_to_grid_batt"
+    name: "逆變優先轉市電供電電池值"
+    ha: {type: "number", min: 10, max: 16, mode: "box", state_key: "inv_to_grid_batt_fb"}
+
+  - key: "charge_level"
+    name: "充電檔位"
+    ha: {type: "number", min: 0, max: 6, mode: "slider", state_key: "charge_level_state"}
+
+  - key: "device_id"
+    name: "設備ID"
+    ha: 
+      type: "number"
+      min: 1
+      max: 247
+      mode: "box"
+      optimistic: true  # 💡 [防呆展示] 沒有 FB 狀態可以讀取，直接啟用盲猜模式
+
+  - key: "combined_mode"
+    name: "一體機模式"
+    ha:
+      type: "select"
+      options: ["單機模式", "控制器模式", "MPPT模式"]
+      icon: "mdi:server-network"
+      state_key: "combined_mode_fb"
+
+  # 遠程開關機 0x401B —— 手冊：FC 03(讀)/06(寫)/10(寫)，1=開機狀態、0=關機狀態
+  # ⚠ 必須用 switch 而非 button：這是兩個穩定狀態的開關，且有回讀暫存器。
+  #   button 只能送單一 payload_press，開得了關不了。
+  # ⚠ key 必須與後端 settings 的 0x401B 條目一致（encode_write 是用 key 反查 settings），
+  #   改成 set_remote_switch 之類會直接拋 ValueError: 未知的寫入 Key。
+  - key: "remote_switch"
+    name: "遠程開關機"
+    ha:
+      type: "switch"
+      icon: "mdi:power"
+      payload_on: "1"                  # 手冊 1=開機
+      payload_off: "0"                 # 手冊 0=關機
+      state_key: "remote_switch_fb"    # UI 顯示聽從回讀點，不做樂觀盲猜

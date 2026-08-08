@@ -1,0 +1,45 @@
+system:
+  node_id: py_ginlong
+  log_level: INFO
+  enable_sniffer: false
+mqtt:
+  broker: 192.168.106.5
+  port: 1883
+  # 帳密由專案根目錄 .env 的 MQTT_USERNAME／MQTT_PASSWORD 提供。
+  discovery_prefix: homeassistant
+driver:
+  type: tcp
+  host: 192.168.106.14
+  port: 502
+  timeout: 1
+  inter_frame_delay: 0.35
+  connect_timeout: 5
+  idle_timeout: 0.1
+  max_response_bytes: 2048
+  max_frame_time: 1
+  flush_max_time: 0.2
+devices:
+  - uid: 1
+    device_type: 6k_inverter
+    adapter: rtu
+    profile: solis_inverter_map
+    poll_interval: 15
+    mode: active
+  - uid: 2
+    device_type: 6k_inverter
+    adapter: rtu
+    profile: solis_inverter_map
+    poll_interval: 15
+    mode: active
+  - uid: 3
+    device_type: 6k_inverter
+    adapter: rtu
+    profile: solis_inverter_map
+    poll_interval: 15
+    mode: active
+  - uid: 4
+    device_type: 6k_inverter
+    adapter: rtu
+    profile: solis_inverter_map
+    poll_interval: 15
+    mode: active

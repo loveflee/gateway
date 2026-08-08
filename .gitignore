@@ -1,0 +1,27 @@
+# Local runtime secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime state, credential-bearing backups, and investigation artefacts
+profile/config.yaml.bak
+profile/config.yaml.lock
+src/*.bak*
+__pycache__/
+*.py[cod]
+scratch/
+old_data/
+report/
+log2
+usb_log
+.agents/
+.codex/
+
+# Local editing copies and profile-analysis outputs
+adapters/bak.*
+adapters/new.*
+adapters/jkbms
+src/bak.*
+profile/*.err
+profile/*.prerename
+profile/*.md

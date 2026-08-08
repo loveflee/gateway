@@ -1,0 +1,33 @@
+#version: '3.8'
+services:
+  py_ginlong:
+    build: .
+    container_name: ginlong
+    restart: unless-stopped
+    network_mode: "host"    # OT 網關建議直通宿主機網路
+    # 帳號密碼僅由專案根目錄的 .env 提供；勿寫回此檔或 profile/config.yaml。
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Taipei
+      - WEB_PORT=8001
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      # 💡 魔法 1：把整個設定資料夾，掛載到容器內的 /app/profile
+      - ./src:/app/src:ro
+      - ./profile:/app/profile:rw
+      - ./adapters:/app/src/adapters:ro
+    # 💡 魔法 2：把容器的「當前工作目錄」切換到 profile 裡面
+    working_dir: /app/profile
+    # 💡 魔法 3：用絕對路徑去呼叫上層 src 裡面的主程式
+    command: ["python", "/app/src/main.py"]
+#    devices:
+# 一定要有真實設備再開啟，開發階段可先註解  ls -l /dev/serial/by-id/  找設備 比較穩定 換孔也沒關西
+#       - /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0:/dev/ttyUSB0
+#      - /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0001-if00-port0:/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0001-if00-port0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"     # 防止日誌撐爆硬碟
+        max-file: "3"
