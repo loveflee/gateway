@@ -1,5 +1,5 @@
 # =============================================================================
-#version driver.py - V1.8 工業封存版 (資源釋放與任務生命週期升級) verison
+#version driver.py - V1.9 工業封存版 (資源釋放與任務生命週期升級) verison
 # 相容：BusMaster V3.8+、ModbusTcpDriver V1.0+
 # 修復歷程：
 # V1.1 : TCP 假死重連、flush 上限、connect timeout、FC 誤殺防護
@@ -15,6 +15,10 @@
 #        慢速失敗（讀取逾時）因逾時本身已耗時，原本即無違規，行為不變。
 # V1.8 : [Protocol] 寫入 ACK 必須驗 UID、FC、固定長度、CRC 與 request echo；合法
 #        Exception 回傳 False，壞 ACK 不再被誤判為寫入成功。
+# V1.9 : [Fix] ACK 驗證守衛加上 request 端 CRC 檢查，只對格式良好的 RTU 寫入請求
+#        套用 RTU ACK 契約。V1.8 對原生 Modbus TCP（MBAP，無 CRC）封包會在
+#        transaction id 低位元組恰為 5/6/15/16 時（約 1.56%）誤入驗證並必然失敗；
+#        修正後 MBAP 自動落回盲收，隧道 RTU（adapter: rtu）保護完全不變。
 # =============================================================================
 import asyncio
 import time
@@ -285,7 +289,24 @@ class RobustAsyncTcpDriver:
     async def write(self, payload: bytes) -> bool:
         """驗證 Modbus RTU 寫入 ACK；合法 Exception 回傳 False。"""
         resp = await self._send_and_recv(payload)
-        if len(payload) < 8 or payload[1] not in (5, 6, 15, 16):
+
+        # ✅ [Fix V1.9] 僅對「格式良好的 Modbus RTU 寫入請求」套用 RTU ACK 契約。
+        #
+        #    driver.type: tcp 同時服務兩種語意不同的傳輸，而 driver 無從分辨，
+        #    只有 adapter 知道自己送的是哪一種：
+        #      · adapter: rtu —— 串口伺服器隧道，完整 RTU 幀（含尾端 CRC16）原樣穿過 TCP。
+        #        payload[1] 就是 FC，尾端兩 bytes 是合法 CRC → 通過本守衛 → 照常驗證 ACK。
+        #      · adapter: tcp —— 原生 Modbus TCP，MBAP 框架（7 bytes 標頭 + PDU，無 CRC）。
+        #        payload[1] 是 transaction id 低位元組而非 FC，且尾端無 CRC。
+        #
+        #    V1.8 只檢查 len 與 payload[1]，MBAP 封包在 transaction id 低位元組恰為
+        #    5/6/15/16 時（_get_next_tx_id 逐次遞增，約 4/256 ≈ 1.56%）會誤入 RTU 驗證，
+        #    而 MBAP 回應為 12 bytes 且無 CRC，必然拋 DriverTimeoutError —— 呈間歇性、
+        #    難以重現。加上 CRC 檢查後，MBAP 封包（誤判率 1/65536）自動落回盲收語意，
+        #    等同 modbus_tcp_driver V1.1 的既有行為，而隧道 RTU 路徑的保護完全不變。
+        if (len(payload) < 8
+                or payload[1] not in (5, 6, 15, 16)
+                or not _has_valid_modbus_crc(payload)):
             return True
 
         sent_uid, sent_fc = payload[0], payload[1]
