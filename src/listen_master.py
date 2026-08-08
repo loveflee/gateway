@@ -1,5 +1,5 @@
 # =============================================================================
-#version listen_master.py - V1.13 真・工業旁路轉運工 (無頭殭屍防護版)
+#version listen_master.py - V1.14 真・工業旁路轉運工 (無頭殭屍防護版)
 # 相容：HAManager V2.9.5+、ListenDriver V1.9.2+、(自定義) ListenAdapter
 # 核心職責：
 #   1. 流式派發：將底層 ListenDriver 吐出的位元組流，派發給註冊的切包機。
@@ -35,9 +35,30 @@
 #   - [Fix] 關機 log 由 CRITICAL 降為 WARNING，措辭不再宣稱「卡死」：正常解碼只需
 #     毫秒級，關機當下剛好有一筆在跑完全可能且會自行結束。誤報一則 CRITICAL 的
 #     代價比漏報高。現改為陳述現況並附上「若關機真的卡住」的排查方向。
+# 修復歷程 (V1.13 -> V1.14) —— 依 report/012 修訂版 v2 實作熔斷復原：
+#   - [Critical] 熔斷不再刪除 HA 實體。原本呼叫 gateway.unregister_device() →
+#     send_discovery(cleanup=True)，對 Discovery topic 發空 retained，等同把實體
+#     從 HA 直接刪掉（歷史數據雖在，實體已不存在且不再更新）。現僅 set_availability
+#     (False)，實體完整保留、只顯示 unavailable。
+#   - [Critical] 熔斷改依 process uptime 分流：
+#       > UPTIME_RESTART_THRESHOLD → 判為暫時性卡頓，os._exit(75) 交由 Docker 重啟，
+#         由 OS 回收卡死的 non-daemon thread（Python 無法中止執行中的 thread）。
+#       ≤ UPTIME_RESTART_THRESHOLD → 代表剛重啟又熔斷，判為持續性故障，
+#         改為鎖定解碼並續活，使自動重啟次數上界為 1，不會形成迴圈。
+#   - [Critical] 退出前補足 Docker restart policy 的 10 秒 arming 門檻。官方文件明載
+#     「restart policy 僅於容器成功存活至少 10 秒後才生效」；早於此退出容器會停死、
+#     WebUI 一併消失。自然週期（啟動約 5s + 3×2s 熔斷）約 11s 屬臨界值，必須補足。
+#   - [Critical] register_device() 註冊即發布 offline，關閉「陳舊 retained online」
+#     競態：否則上一進程未送達的 offline 會讓 broker 停在 online，與新進程的
+#     gateway online 同時成立（availability_mode: all），HA 把陳舊值顯示為可用。
+#   - [Fix] 新增 _decoding_disabled guard，且必須置於 run_in_executor() 之前 ——
+#     置於取回結果之後無效，工作早已提交，worker 仍會被逐一燒光。
+#   - [Fix] 移除熔斷時的 executor 重建：卡死 thread 屬舊 pool 且無法回收，
+#     重建只是在卡死 thread 仍在的情況下疊加新 pool。
 # =============================================================================
 
 import asyncio
+import os
 import time
 import logging
 import threading
@@ -46,6 +67,12 @@ from concurrent.futures import ThreadPoolExecutor
 from listen_driver import DriverDisconnectError
 
 logger = logging.getLogger(__name__)
+
+# ✅ [Fix V1.14] 進程起點。本模組於 main.py 頂部被匯入，且容器 command 直接執行
+#    main.py（PID 1），故此值即等同「容器啟動時刻」，可用於 Docker restart policy
+#    的 10 秒 arming 判斷。匯入耗時使此值略晚於容器真正啟動，計算出的 uptime 會
+#    略微低估 —— 方向安全（寧可多等，不可少等）。
+_PROCESS_START = time.monotonic()
 
 def _values_equal(a, b, tolerance: float = 0.01) -> bool:
     if type(a) == type(b) and isinstance(a, (int, str)):
@@ -56,6 +83,15 @@ def _values_equal(a, b, tolerance: float = 0.01) -> bool:
         return False
 
 class ListenMasterDispatcher:
+    # ✅ [Fix V1.14] 熔斷分流門檻。
+    #   · UPTIME_RESTART_THRESHOLD：進程存活超過此秒數才判定為「暫時性卡頓」，
+    #     值得交由 Docker 重啟試一次；否則視為「重啟後仍持續故障」直接鎖定，
+    #     使自動重啟次數上界為 1，不會形成迴圈。須遠大於「啟動+熔斷」單次週期。
+    #   · DOCKER_ARM_SECONDS：Docker 官方文件明載 restart policy 僅於容器成功存活
+    #     至少 10 秒後才生效；早於此退出，容器會直接停死、WebUI 一併消失。
+    UPTIME_RESTART_THRESHOLD = 300.0
+    DOCKER_ARM_SECONDS = 10.0
+
     def __init__(self, driver, offline_time: int = 60):
         self.driver = driver
         self.offline_time = offline_time
@@ -76,6 +112,11 @@ class ListenMasterDispatcher:
         # 🚀 [V1.8.4 防護] OS Thread 洩漏保險絲計數器
         self._decode_timeout_streak = 0
         self._decode_timeout_threshold = 3
+
+        # ✅ [Fix V1.14] 熔斷後的解碼鎖定旗標。為真時不再向 executor 提交工作，
+        #    避免持續性故障把 4 個 worker 全部燒光。driver 仍照常讀取，
+        #    app_state.traffic_log 的原始側錄不受影響。
+        self._decoding_disabled = False
 
         # ✅ [Fix V1.12/V1.13] 「已開始執行但尚未跑完」的解碼工作計數，供關機診斷。
         #    增減量都發生在 worker 執行緒（多個 worker 併發），故需鎖保護
@@ -99,6 +140,20 @@ class ListenMasterDispatcher:
             "online": False
         }
         self._last_state_cache[uid] = OrderedDict()
+
+        # ✅ [Fix V1.14] 註冊即發布 offline，關閉「陳舊 retained online」競態。
+        #    HAManager 的 _availability_cache 初值為 None，republish_availability()
+        #    會因此直接 return；而未上線的設備不會走到 _check_offline_status 的任一
+        #    分支（兩者皆要求 state["online"] is True）。若上一進程的 offline 未送達
+        #    （_force_all_offline 沒有 wait_for_publish），broker 上的 online 就會永久
+        #    存活，與新進程的 gateway online 同時成立 → HA 把陳舊數值顯示為「可用」。
+        #    此處補一次發布同時覆蓋 broker retained 並讓 cache 變為 False，
+        #    使日後 MQTT 重連的 republish_availability() 生效。
+        try:
+            ha_manager.set_availability(False)
+        except Exception:
+            logger.exception(f"[ListenMaster] 設備 #{uid} 初始 availability 發布失敗（不影響掛載）")
+
         logger.info(f"[ListenMaster] 🎧 監聽設備 #{uid} 已註冊 (離線判定: {self.offline_time}s)")
         return True
 
@@ -204,6 +259,15 @@ class ListenMasterDispatcher:
                 if chunk:
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug(f"[RAW RX] {chunk.hex().upper()}")
+
+                    # ✅ [Fix V1.14] guard 必須置於 run_in_executor() 之前。
+                    #    若放在取回結果之後，工作早已提交，worker 仍會被逐一燒光
+                    #    （實測：提交 6 件卡死工作即佔滿全部 4 個 worker）。
+                    #    此處仍呼叫 _check_offline_status 以保留離線判定。
+                    if self._decoding_disabled:
+                        self._check_offline_status(now)
+                        continue
+
                     adapters_snapshot = list(self.adapters.items())
 
                     try:
@@ -220,28 +284,48 @@ class ListenMasterDispatcher:
                             f"等待保險絲門檻..."
                         )
 
-                        # 🚀 [V1.8.4 防護] 軟體保險絲熔斷：強制拔管所有 Listen 設備，守護 OS 核心資源
+                        # 🚀 [V1.8.4 防護] 軟體保險絲熔斷
+                        # ✅ [Fix V1.14] 熔斷處置全面改寫，詳見檔頭修復歷程。
+                        #    移除 unregister_device()／Discovery cleanup／executor 重建，
+                        #    改為「保留實體 + 依 uptime 分流」。
                         if self._decode_timeout_streak >= self._decode_timeout_threshold:
-                            logger.critical(
-                                f"[ListenMaster] 🚨🚨 連續 {self._decode_timeout_streak} 次解碼逾時！保險絲熔斷！\n"
-                                f"為防止 OS Thread 記憶體耗盡，強制卸載所有監聽設備，請立即排查 Adapter 程式碼。"
-                            )
                             self._force_all_offline()
+                            uptime = time.monotonic() - _PROCESS_START
 
-                            # 🚀 修復 MEDIUM-B: 反向通知 Gateway 清理，避免 HA 殭屍與 Memory Leak
-                            for uid in list(self.adapters.keys()):
-                                try:
-                                    import app_state
-                                    if hasattr(app_state, 'gateway') and app_state.gateway:
-                                        app_state.gateway.unregister_device(uid)
-                                    else:
-                                        self.unregister_device(uid)
-                                except ImportError:
-                                    self.unregister_device(uid)
-
-                            self._executor.shutdown(wait=False, cancel_futures=True)
-                            self._executor = ThreadPoolExecutor(max_workers=self._executor_workers, thread_name_prefix="ListenDecoder")
-                            self._decode_timeout_streak = 0
+                            if uptime > self.UPTIME_RESTART_THRESHOLD:
+                                # 已穩定運行一段時間才熔斷 → 研判為暫時性卡頓，
+                                # 重啟可由 OS 回收卡死的 non-daemon thread。
+                                logger.critical(
+                                    f"[ListenMaster] 🚨🚨 連續 {self._decode_timeout_streak} 次解碼逾時，保險絲熔斷！\n"
+                                    f"  · 進程已運行 {uptime:.0f}s（> {self.UPTIME_RESTART_THRESHOLD:.0f}s），"
+                                    f"研判為暫時性卡頓 → 主動退出，交由 Docker restart policy 重啟以回收卡死的 thread。\n"
+                                    f"  · HA Discovery 完整保留，設備僅轉為 unavailable，不會被刪除。"
+                                )
+                                # Docker 官方文件：restart policy 僅於容器成功存活至少 10 秒後才生效。
+                                # 早於此退出，容器會直接停死，WebUI 也一併消失 —— 那比重啟迴圈更糟。
+                                if uptime < self.DOCKER_ARM_SECONDS:
+                                    wait = self.DOCKER_ARM_SECONDS + 0.1 - uptime
+                                    logger.critical(
+                                        f"[ListenMaster] 等待 {wait:.1f}s 以跨過 Docker restart policy 的 "
+                                        f"{self.DOCKER_ARM_SECONDS:.0f} 秒 arming 門檻，確保容器會被重啟…"
+                                    )
+                                    await asyncio.sleep(wait)
+                                # 給 _force_all_offline() 的 QoS1 publish 一個送出窗口。
+                                # 即使未送達也不致命：下一進程註冊時會再發一次 offline（Fix V1.14 B1）。
+                                await asyncio.sleep(0.3)
+                                os._exit(75)
+                            else:
+                                # 進程剛起就熔斷 → 代表重啟並未解決問題（或本來就是持續性故障）。
+                                # 再退出只會形成重啟迴圈，且 WebUI 會反覆消失。改為鎖定解碼。
+                                self._decoding_disabled = True
+                                logger.critical(
+                                    f"[ListenMaster] 🚨🚨 連續 {self._decode_timeout_streak} 次解碼逾時，保險絲熔斷！\n"
+                                    f"  · 進程僅運行 {uptime:.0f}s（≤ {self.UPTIME_RESTART_THRESHOLD:.0f}s），"
+                                    f"研判為持續性故障 → 已鎖定解碼，不再自動重啟以免形成迴圈。\n"
+                                    f"  · HA 實體、WebUI、health 全部保留供診斷；設備將顯示為 unavailable。\n"
+                                    f"  · 根因請排查 adapter.feed() 是否有無窮迴圈或永久阻塞的外部 I/O；\n"
+                                    f"    修復 adapter 後重啟容器即可恢復（Python 無法中止已卡死的 thread）。"
+                                )
                         continue
 
                     for uid, decoded_data in results:

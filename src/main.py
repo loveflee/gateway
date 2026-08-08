@@ -1,7 +1,7 @@
 # =============================================================================
-# version main.py v2.10
+# version main.py v2.11
 # 模組名稱：Edge Gateway V3 主控樞紐 (The Controller)
-# 版本狀態：V2.10 (帳密改由環境變數注入)
+# 版本狀態：V2.11 (監聽熔斷復原 + 監聽端啟動不阻斷)
 # 核心職責：
 #   1. 生命週期管理：解析 config.yaml，初始化底層通訊與 MQTT 代理。
 #   2. 跨執行緒橋接：採用 Load Shedding (負載拋棄) 策略，防禦 MQTT 洪泛攻擊。
@@ -61,6 +61,15 @@
 #   - [V2.10] MQTT 帳密不再讀取 profile/config.yaml，統一由環境變數
 #             MQTT_USERNAME／MQTT_PASSWORD 注入。兩者必須同時存在，避免部署遺漏 .env
 #             後以匿名連線悄悄改變 MQTT／HA 可觀測行為。
+#   - [V2.11] 依 report/012 修訂版 v2 實作監聽熔斷復原的 main 端配套：
+#             (1) 監聽端首次 connect() 失敗不再 sys.exit(1)。「USB 此刻不在」是暫時性
+#                 實體狀態（插拔、udev 重新列舉、開機競速），與「設定檔寫壞」性質不同；
+#                 原本會連 WebUI 一起殺掉，反而斷了唯一的救援路徑。
+#                 AsyncListenSerialDriver.read_stream() 已內建退避重連，此處只需不要
+#                 提前退出即可由既有機制接手，未新增任何狀態機。
+#                 僅放寬「實體 connect() 回傳 false」，缺欄位與不支援 type 仍為 fatal。
+#             (2) health payload 新增 listen_decoding_locked，使熔斷鎖定狀態可從 MQTT
+#                 側觀測；否則鎖定後設備只是 unavailable，與單純沒資料無法區分。
 # =============================================================================
 import asyncio
 import signal
@@ -566,6 +575,14 @@ class EdgeGateway:
                     "health_publish_failures_total": self._health_publish_failures,
                 }
 
+                # ✅ [Fix V2.11] 監聽軌解碼鎖定狀態必須可觀測。熔斷鎖定後設備只是
+                #    unavailable，與「單純沒收到資料」在 HA 上外觀完全相同；沒有這個
+                #    欄位，操作者只能翻 docker log 才知道是熔斷還是斷線。
+                if self.listen_master is not None:
+                    payload["listen_decoding_locked"] = bool(
+                        getattr(self.listen_master, "_decoding_disabled", False)
+                    )
+
                 # ✅ [Fix V2.7] 檢查 publish 的 rc。paho 失敗只回非零 rc、不拋例外，
                 #    原本的 `except: pass` 幾乎是死碼。節流規則：第一次失敗印一次，
                 #    之後每 10 次印一次（health 本身 60s 一輪，不會洗版）。
@@ -719,17 +736,25 @@ class EdgeGateway:
                 if self.driver: await self.driver.disconnect()
                 sys.exit(1)
 
+            # ✅ [Fix V2.11] 監聽端首次連線失敗不再 sys.exit(1)。
+            #    原本會殺掉整個網關，WebUI（daemon thread）一併消失 —— 但「USB 裝置
+            #    此刻不在」與「設定檔寫壞」是完全不同性質的問題：前者是暫時性的實體
+            #    狀態（插拔、udev 重新列舉、開機競速），本來就該靠重連解決。
+            #    AsyncListenSerialDriver.read_stream() 已內建重連：偵測到未連線即呼叫
+            #    _reconnect()，1s 起指數退避、USB 上限 10s、含 jitter，連上後歸零。
+            #    因此這裡只需「不要提前退出」，既有機制就會接手，無須新增狀態機。
+            #    ⚠️ 僅放寬「實體 connect() 回傳 false」這一種情況；缺必填欄位與
+            #       不支援的 driver type 仍維持 fatal（見上方 _require 與 else 分支）。
             if not await self.listen_driver.connect():
                 target = (f"{ld_cfg.get('host')}:{ld_cfg.get('port')}" if ld_type == "tcp"
                           else f"{ld_cfg.get('port')} @ {ld_cfg.get('baudrate')}bps")
-                logger.critical(
-                    f"啟動失敗：監聽總線 driver type={ld_type} 無法連線至 {target}。"
-                    f"WebUI 為 daemon thread，會隨本次退出一併終止；"
-                    f"若需進入 WebUI 修改設定，請在 host 上編輯 bind-mount 的 profile/config.yaml，"
-                    f"將 devices: 清空後重啟，即可進入純 WebUI 模式開機。"
+                logger.error(
+                    f"⚠️ 監聽總線 driver type={ld_type} 首次連線失敗（目標：{target}）。\n"
+                    f"  · 網關【不會】因此退出：WebUI、MQTT、health 全部照常運作。\n"
+                    f"  · 監聽設備先標記為 unavailable，由 driver 既有的退避重連持續嘗試\n"
+                    f"    （1s 起指數退避，USB 上限 10s，含 jitter），連上後第一個有效幀即恢復 ONLINE。\n"
+                    f"  · 若長時間未恢復，請確認裝置是否存在：ls -l {ld_cfg.get('port')}"
                 )
-                if self.driver: await self.driver.disconnect()
-                sys.exit(1)
 
             self.listen_master = ListenMasterDispatcher(self.listen_driver, offline_time=offline_time)
 
