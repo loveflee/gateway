@@ -1,5 +1,5 @@
 # =============================================================================
-# generic_adapter.py - V2.4R 工業封存版
+# generic_adapter.py - V2.6 工業封存版
 # 核心職責：標準 Modbus RTU 解析器 (TCP/Serial 共用卡車頭)
 # 修復歷程：
 #   V2.3 : 將 decode() 重構，拆分出純函數 _extract_data()。
@@ -16,6 +16,8 @@
 #          出來 decode() 就不拋錯，設備維持 ONLINE 但 HA 上大片實體無數值，預設 INFO
 #          等級查不到任何線索。改為累計三種丟棄數並於命令解析結束後輸出彙總 WARNING。
 #          僅新增日誌，不改變任何解析結果與例外行為。
+#   V2.6 : [Protocol] Deep CRC Radar 增加合法 Exception 候選；由 request count 自動
+#          推導 FC01/02/03/04 回覆資料長度，拒絕同 UID/FC 的錯 quantity 舊幀。
 # =============================================================================
 
 import struct
@@ -65,11 +67,27 @@ class Adapter:
 
             base = struct.pack('>BBHH', self.uid, fc, start_addr, count)
             req  = base + calc_crc16(base)
+
+            # 讀取回覆不含起始位址，必須由本次 request 的 quantity 鎖定資料長度，
+            # 否則同 UID／同 FC 的舊幀可能在 CRC 正確時被誤認為本次回覆。
+            expected_data_bytes = None
+            protocol_expected_len = None
+            if fc in (1, 2):
+                expected_data_bytes = (count + 7) // 8
+                protocol_expected_len = 5 + expected_data_bytes
+            elif fc in (3, 4):
+                expected_data_bytes = count * 2
+                protocol_expected_len = 5 + expected_data_bytes
+
+            profile_expected_len = cmd.get('response_len')
             cmds.append({
                 "id":           cmd['id'],
                 "fc":           fc,
                 "req":          req,
-                "expected_len": cmd.get('response_len'),
+                # 保留既有 map 的 response_len 語意；未設定時自動套用協定推導值。
+                "expected_len": profile_expected_len if profile_expected_len is not None else protocol_expected_len,
+                "expected_data_bytes": expected_data_bytes,
+                "count":        count,
             })
         return cmds
 
@@ -326,14 +344,18 @@ class Adapter:
         expected_fc = context["cmd"]['fc'] if ctx_type == "poll" else context.get("read_fc", 0x03)
 
         # --- 🚀 防禦 RS485 前置與後置浮接雜訊 (Deep CRC Radar) ---
-        header = bytes([self.uid, expected_fc])
+        normal_header = bytes([self.uid, expected_fc])
+        exception_header = bytes([self.uid, expected_fc | 0x80])
         valid_frame = None
         search_idx = 0
         
         while True:
-            start_idx = raw_data.find(header, search_idx)
-            if start_idx == -1:
+            normal_idx = raw_data.find(normal_header, search_idx)
+            exception_idx = raw_data.find(exception_header, search_idx)
+            candidates = [idx for idx in (normal_idx, exception_idx) if idx != -1]
+            if not candidates:
                 break
+            start_idx = min(candidates)
                 
             candidate = raw_data[start_idx:]
             fc = candidate[1]
@@ -361,12 +383,20 @@ class Adapter:
         else:
             raise DataDecodeError(f"在 {len(raw_data)} bytes 的雜訊中找不到合法 CRC 的封包")
 
+        if raw_data[1] == (expected_fc | 0x80):
+            # Radar 已驗 UID、FC、固定 5 bytes 與 CRC；此處只轉成可觀測的協定語意。
+            raise DataDecodeError(
+                f"Modbus Exception: UID={self.uid} FC={expected_fc:02X} Code={raw_data[2]:02X}"
+            )
+
         ctx_type = context.get("type")
         if ctx_type == "poll":
             cmd = context["cmd"]
             self._verify_modbus_frame(raw_data,
                                       expected_fc=cmd['fc'],
-                                      expected_len=cmd.get('expected_len'))
+                                      expected_len=cmd.get('expected_len'),
+                                      expected_data_bytes=cmd.get('expected_data_bytes'),
+                                      expected_count=cmd.get('count'))
         elif ctx_type == "verify":
             self._verify_modbus_frame(raw_data,
                                       expected_fc=context.get("read_fc", 0x03))
@@ -379,12 +409,11 @@ class Adapter:
 
     def _verify_modbus_frame(self, raw_data: bytes,
                              expected_fc: int = None,
-                             expected_len: int = None):
+                             expected_len: int = None,
+                             expected_data_bytes: int = None,
+                             expected_count: int = None):
         if not raw_data or len(raw_data) < 5:
             raise DataDecodeError(f"封包過短 ({len(raw_data) if raw_data else 0} bytes)")
-
-        if expected_len and len(raw_data) != expected_len:
-            raise DataDecodeError(f"長度不符: 預期 {expected_len}, 實際 {len(raw_data)}")
 
         if raw_data[0] != self.uid:
             raise DataDecodeError(f"Slave ID 不符 (收到 {raw_data[0]}，預期 {self.uid})")
@@ -401,6 +430,11 @@ class Adapter:
                 raise DataDecodeError(
                     f"ByteCount 破裂: 標示 {byte_count} bytes, 實際載荷 {actual_data} bytes"
                 )
+            if expected_data_bytes is not None and byte_count != expected_data_bytes:
+                raise DataDecodeError(
+                    f"Response quantity mismatch: expected {expected_count} count "
+                    f"({expected_data_bytes} bytes), received {byte_count} bytes"
+                )
 
         elif fc in (5, 6, 15, 16):
             if len(raw_data) != 8:
@@ -411,3 +445,6 @@ class Adapter:
         payload, recv_crc = raw_data[:-2], raw_data[-2:]
         if calc_crc16(payload) != recv_crc:
             raise DataDecodeError("CRC16 校驗失敗（物理干擾或錯位）")
+
+        if expected_len and len(raw_data) != expected_len:
+            raise DataDecodeError(f"長度不符: 預期 {expected_len}, 實際 {len(raw_data)}")

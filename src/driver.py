@@ -1,5 +1,5 @@
 # =============================================================================
-#version driver.py - V1.6 工業封存版 (資源釋放與任務生命週期升級) verison
+#version driver.py - V1.8 工業封存版 (資源釋放與任務生命週期升級) verison
 # 相容：BusMaster V3.8+、ModbusTcpDriver V1.0+
 # 修復歷程：
 # V1.1 : TCP 假死重連、flush 上限、connect timeout、FC 誤殺防護
@@ -13,6 +13,8 @@
 #        搶發（實測 0.05s，遠低於 inter_frame_delay 0.35s），違反逆變器 >300ms 的
 #        turnaround 要求並引發連鎖逾時。改以 try/finally 在鎖內確保所有離開路徑都計時。
 #        慢速失敗（讀取逾時）因逾時本身已耗時，原本即無違規，行為不變。
+# V1.8 : [Protocol] 寫入 ACK 必須驗 UID、FC、固定長度、CRC 與 request echo；合法
+#        Exception 回傳 False，壞 ACK 不再被誤判為寫入成功。
 # =============================================================================
 import asyncio
 import time
@@ -23,6 +25,18 @@ logger = logging.getLogger(__name__)
 class DriverTimeoutError(Exception):
     """硬體層無回應或物理干擾，交由 Bus Master 處置"""
     pass
+
+
+def _has_valid_modbus_crc(frame: bytes) -> bool:
+    if len(frame) < 3:
+        return False
+    crc = 0xFFFF
+    for byte in frame[:-2]:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return (crc & 0xFF) == frame[-2] and ((crc >> 8) & 0xFF) == frame[-1]
+
 
 class RobustAsyncTcpDriver:
     """
@@ -269,21 +283,31 @@ class RobustAsyncTcpDriver:
     # =========================================================================
 
     async def write(self, payload: bytes) -> bool:
-        """Modbus Exception 精確判定"""
+        """驗證 Modbus RTU 寫入 ACK；合法 Exception 回傳 False。"""
         resp = await self._send_and_recv(payload)
+        if len(payload) < 8 or payload[1] not in (5, 6, 15, 16):
+            return True
 
-        if (len(resp) == 5 and len(payload) >= 2
-                and resp[0] == payload[0]
-                and 1 <= resp[2] <= 4):
-            sent_fc = payload[1]
-            recv_fc = resp[1]
-            if recv_fc == (sent_fc | 0x80):
-                logger.warning(
-                    f"[Driver] Modbus Exception: Slave={resp[0]} "
-                    f"FC=0x{sent_fc:02X} Code={resp[2]}"
-                )
-                return False
+        sent_uid, sent_fc = payload[0], payload[1]
+        if len(resp) == 5 and resp[0] == sent_uid and resp[1] == (sent_fc | 0x80):
+            if not _has_valid_modbus_crc(resp):
+                raise DriverTimeoutError("Write ACK Exception CRC mismatch")
+            logger.warning(
+                f"[Driver] Modbus Exception: Slave={sent_uid} "
+                f"FC=0x{sent_fc:02X} Code={resp[2]}"
+            )
+            return False
 
+        if len(resp) != 8:
+            raise DriverTimeoutError(f"Write ACK length mismatch: expected 8, received {len(resp)}")
+        if resp[0] != sent_uid:
+            raise DriverTimeoutError(f"Write ACK UID mismatch: expected {sent_uid}, received {resp[0]}")
+        if resp[1] != sent_fc:
+            raise DriverTimeoutError(f"Write ACK FC mismatch: expected 0x{sent_fc:02X}, received 0x{resp[1]:02X}")
+        if not _has_valid_modbus_crc(resp):
+            raise DriverTimeoutError("Write ACK CRC mismatch")
+        if resp[2:6] != payload[2:6]:
+            raise DriverTimeoutError("Write ACK echo mismatch")
         return True
 
     async def read(self, payload: bytes) -> bytes:
