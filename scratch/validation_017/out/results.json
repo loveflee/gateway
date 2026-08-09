@@ -1,89 +1,38 @@
-{
-  "tests": {
-    "static_baseline": {
-      "pass": true,
-      "elapsed_ms": 0.83,
-      "detail": {
-        "assertions": 10,
-        "current_fuse": "3 x 2.0s",
-        "current_source_has_host_counter": false,
-        "current_source_has_executor_guard": false,
-        "current_source_preserves_discovery_on_fuse": false,
-        "restart_policy": "unless-stopped",
-        "profile_bind_mount_available": true,
-        "current_config_listen_devices": 0
-      }
-    },
-    "atomic_concurrency": {
-      "pass": true,
-      "elapsed_ms": 283.36,
-      "detail": {
-        "processes": 8,
-        "increments_each": 25,
-        "expected": 200,
-        "actual": 200,
-        "elapsed_ms": 282.51
-      }
-    },
-    "trip_ladder": {
-      "pass": true,
-      "elapsed_ms": 184.73,
-      "detail": {
-        "outcomes": [
-          "trip1=exit75",
-          "trip2=exit75",
-          "trip3=locked"
-        ],
-        "three_fuse_elapsed_ms": [
-          17.51,
-          17.37,
-          17.19
-        ],
-        "discovery_retained_entries": 1,
-        "trip3_submissions_after_guard": 0,
-        "trip3_restart_submissions": 0,
-        "exit_wait_at_6s": 4.1
-      }
-    },
-    "stability_900s": {
-      "pass": true,
-      "elapsed_ms": 56.21,
-      "detail": {
-        "reset_boundary_s": [
-          899.9,
-          900.0
-        ],
-        "timeout_invalidates": true,
-        "counter_after_timeout": 1
-      }
-    },
-    "docker_arming": {
-      "pass": true,
-      "elapsed_ms": 0.02,
-      "detail": {
-        "arm_seconds": 10.1,
-        "waits": {
-          "0.0": 10.1,
-          "6.0": 4.1,
-          "10.0": 0.1,
-          "10.1": 0.0,
-          "12.0": 0.0
-        }
-      }
-    },
-    "safe_status_errors": {
-      "pass": true,
-      "elapsed_ms": 62.11,
-      "detail": {
-        "corrupt_locks_before_submit": true,
-        "wrong_type_locks_before_submit": true,
-        "write_failure_locks_without_exit": true
-      }
-    }
+[
+  {
+    "id": "V1",
+    "name": "B1 註冊即發布 offline，覆蓋陳舊 retained",
+    "pass": true,
+    "detail": "上一進程殘留 retained        = 'online'\n僅 republish_availability()  = 'online'   ← cache=None 提早 return，未覆蓋\nregister_device() 後         = 'offline'   ← ✅ 已覆蓋\n_availability_cache          = False   → MQTT 重連 republish 才有效"
   },
-  "summary": {
-    "total": 6,
-    "passed": 6,
-    "failed": 0
+  {
+    "id": "V2",
+    "name": "A3 uptime>300s → os._exit(75) 交由 Docker 重啟，實體完整保留",
+    "pass": true,
+    "detail": "os._exit 呼叫            = [75]   ← 期望 [75]\nDiscovery retained 前/後  = 9 / 9   ← ✅ 未刪除\n對 Discovery 發空 retained = 0 則   ← ✅ 期望 0（A1 已移除 cleanup）\n三台設備 availability     = ['offline', 'offline', 'offline']\n_decoding_disabled       = False   ← 退出路徑不鎖定"
+  },
+  {
+    "id": "V3",
+    "name": "A4 uptime≤300s → 鎖定續活，不進入重啟迴圈",
+    "pass": true,
+    "detail": "os._exit 呼叫        = []   ← ✅ 期望 []（不退出）\n_decoding_disabled   = True   ← ✅ 已鎖定\nDiscovery retained   = 3（原 3）  ← ✅ 未刪除\n設備 availability    = 'offline'\nadapter/HA manager 保留 = True / True   ← ✅ 未 unregister"
+  },
+  {
+    "id": "V4",
+    "name": "C1 鎖定後 driver 照讀但零提交，worker 未被燒",
+    "pass": true,
+    "detail": "driver 讀取次數   = 18   ← driver 仍運作（保留 traffic 側錄）\ninflight 解碼工作 = 0   ← ✅ 期望 0，guard 在 run_in_executor 之前生效"
+  },
+  {
+    "id": "V5",
+    "name": "A4 Docker 10 秒 arming 門檻補償正確",
+    "pass": true,
+    "detail": "✅ process age=  3.0s → 補 sleep 7.1s\n✅ process age= 12.0s → 不需補償\n\nDocker 官方文件：restart policy 僅於容器成功存活至少 10 秒後才生效。\n自然週期（啟動約 5s + 3×2s 熔斷 ≈ 11s）屬臨界值，必須補足否則容器停死。"
+  },
+  {
+    "id": "V6",
+    "name": "正常 165ms JK 資料流：先 offline→收到幀轉 online，行為不變",
+    "pass": true,
+    "detail": "註冊當下 availability = ['offline', 'offline', 'offline']   ← ✅ B1 新增：先明確 offline\n收到有效幀後          = ['online', 'online', 'online']   ← ✅ 正常轉 online\nstate 發布            = 27 則\ntimeout streak / 鎖定 / inflight = 0 / False / 0"
   }
-}
+]

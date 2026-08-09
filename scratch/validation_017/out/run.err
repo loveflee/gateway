@@ -1,0 +1,8 @@
+CRITICAL:listen_master:[ListenMaster] 🚨🚨 連續 3 次解碼逾時，保險絲熔斷！
+  · 進程已運行 3602s（> 300s），研判為暫時性卡頓 → 主動退出，交由 Docker restart policy 重啟以回收卡死的 thread。
+  · HA Discovery 完整保留，設備僅轉為 unavailable，不會被刪除。
+CRITICAL:listen_master:[ListenMaster] 🚨🚨 連續 3 次解碼逾時，保險絲熔斷！
+  · 進程僅運行 13s（≤ 300s），研判為持續性故障 → 已鎖定解碼，不再自動重啟以免形成迴圈。
+  · HA 實體、WebUI、health 全部保留供診斷；設備將顯示為 unavailable。
+  · 根因請排查 adapter.feed() 是否有無窮迴圈或永久阻塞的外部 I/O；
+    修復 adapter 後重啟容器即可恢復（Python 無法中止已卡死的 thread）。
