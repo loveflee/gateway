@@ -22,6 +22,7 @@
 
 import struct
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,106 @@ class Adapter:
         logger.warning(f"[Adapter] 未能解包: len={len(chunk)} datatype={datatype}")
         return None
 
+    def _find_setting(self, key: str) -> tuple[dict, int]:
+        """Return a setting and its numeric Modbus address without changing profile syntax."""
+        for addr_str, cfg in self.settings.items():
+            if cfg['key'] == key:
+                target_addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
+                return cfg, target_addr
+        raise ValueError(f"未知的寫入 Key '{key}'")
+
+    def _resolve_write_sensor(self, setting: dict, key: str):
+        """Resolve write metadata: explicit link_sensor first, then existing same-key fallback."""
+        sensor_key = setting.get("link_sensor") or key
+        for sensor in self.sensors:
+            if sensor.get("key") == sensor_key:
+                return sensor
+        return None
+
+    def _resolve_fc16_codec(self, setting: dict, key: str):
+        """Return the explicitly inferable P1 two-register codec, or None for legacy FC16."""
+        sensor = self._resolve_write_sensor(setting, key)
+        if sensor is None:
+            return None
+
+        try:
+            length = int(sensor.get("length", 2))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"FC16 寫入 metadata length 無效: {e}")
+
+        # A normal 16-bit sensor remains on the legacy count=1 path exactly.
+        if length == 2:
+            return None
+        if length != 4:
+            raise ValueError(f"FC16 本輪只支援 2 或 4 bytes metadata，收到 {length}")
+
+        datatype = sensor.get("datatype", "uint8")
+        if sensor.get("signed"):
+            datatype = datatype.replace("u", "", 1)
+        if datatype not in ("uint32", "int32", "float32"):
+            raise ValueError(f"FC16 32-bit 寫入不支援 datatype '{datatype}'")
+
+        word_order = sensor.get("word_order", "big")
+        if word_order not in ("big", "little", "swap", "word_swap", "byte_swap"):
+            raise ValueError(f"FC16 32-bit 寫入不支援 word_order '{word_order}'")
+
+        return {
+            "datatype": datatype,
+            "word_order": word_order,
+            "register_count": 2,
+            "data_bytes": 4,
+        }
+
+    @staticmethod
+    def _coerce_legacy_16bit(scaled_value: float) -> int:
+        """Preserve signed/unsigned 16-bit legacy bytes while rejecting wraparound."""
+        if not math.isfinite(scaled_value):
+            raise ValueError("寫入值必須是有限數值")
+        int_val = int(round(scaled_value))
+        # Existing maps can represent both uint16 and int16.  Preserve both legal
+        # forms, but never silently turn an invalid value into another register.
+        if not -0x8000 <= int_val <= 0xFFFF:
+            raise ValueError(f"16-bit 寫入值超出範圍: {int_val}")
+        return int_val
+
+    @staticmethod
+    def _apply_write_word_order(chunk: bytes, word_order: str) -> bytes:
+        """Inverse of the existing 32-bit read transforms (all are self-inverse)."""
+        if word_order in ("swap", "word_swap"):
+            return chunk[2:4] + chunk[0:2]
+        if word_order == "byte_swap":
+            return bytes([chunk[1], chunk[0], chunk[3], chunk[2]])
+        if word_order == "little":
+            return chunk[::-1]
+        return chunk
+
+    def _encode_fc16_32bit_value(self, scaled_value: float, codec: dict) -> bytes:
+        """Encode an approved P1 32-bit value into device-order register bytes."""
+        datatype = codec["datatype"]
+        try:
+            if datatype == "uint32":
+                int_val = int(round(scaled_value))
+                if not 0 <= int_val <= 0xFFFFFFFF:
+                    raise ValueError(f"uint32 寫入值超出範圍: {int_val}")
+                chunk = struct.pack('>I', int_val)
+            elif datatype == "int32":
+                int_val = int(round(scaled_value))
+                if not -0x80000000 <= int_val <= 0x7FFFFFFF:
+                    raise ValueError(f"int32 寫入值超出範圍: {int_val}")
+                chunk = struct.pack('>i', int_val)
+            else:  # float32 is the remaining codec accepted by _resolve_fc16_codec.
+                chunk = struct.pack('>f', scaled_value)
+        except (OverflowError, struct.error) as e:
+            raise ValueError(f"{datatype} 寫入值無法編碼: {e}")
+        return self._apply_write_word_order(chunk, codec["word_order"])
+
+    def _build_fc16_request(self, target_addr: int, register_bytes: bytes) -> bytes:
+        if not register_bytes or len(register_bytes) % 2:
+            raise ValueError("FC16 register payload 長度必須是非零偶數")
+        register_count = len(register_bytes) // 2
+        base = struct.pack('>BBHHB', self.uid, 0x10, target_addr, register_count, len(register_bytes))
+        return base + register_bytes + calc_crc16(base + register_bytes)
+
     def build_poll_read(self) -> tuple[bytes, dict]:
         if not self._poll_cmds:
             raise RuntimeError("設備未定義 read_commands")
@@ -144,15 +245,9 @@ class Adapter:
         return cmd['req'], {"type": "poll", "cmd": cmd}
 
     def build_verify_read(self, key: str) -> tuple[bytes, dict]:
-        setting = None
-        target_addr = None
-        for addr_str, cfg in self.settings.items():
-            if cfg['key'] == key:
-                setting = cfg
-                target_addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
-                break
-
-        if not setting:
+        try:
+            setting, target_addr = self._find_setting(key)
+        except ValueError:
             raise ValueError(f"找不到寫入 Key: {key}")
 
         # ✅ [Fix V2.4R] 強制 int 轉型
@@ -162,23 +257,28 @@ class Adapter:
         except (TypeError, ValueError) as e:
             raise ValueError(f"build_verify_read 參數無效: {e}")
 
+        codec = self._resolve_fc16_codec(setting, key) if write_fc == 16 else None
+        if codec:
+            reg_count = codec["register_count"]
+
         read_fc = 0x01 if write_fc in (5, 15) else 0x03
         base = struct.pack('>BBHH', self.uid, read_fc, target_addr, reg_count)
         req  = base + calc_crc16(base)
 
-        return req, {"type": "verify", "key": key, "read_fc": read_fc}
+        # Legacy contexts intentionally remain byte-for-byte and behaviourally
+        # unchanged.  Strict quantity validation is only for the new 32-bit path.
+        context = {"type": "verify", "key": key, "read_fc": read_fc}
+        if codec:
+            context.update({
+                "strict_verify": True,
+                "expected_data_bytes": codec["data_bytes"],
+                "expected_count": codec["register_count"],
+                "codec": codec,
+            })
+        return req, context
 
     def encode_write(self, key: str, value) -> bytes:
-        setting = None
-        target_addr = None
-        for addr_str, cfg in self.settings.items():
-            if cfg['key'] == key:
-                setting = cfg
-                target_addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
-                break
-
-        if not setting:
-            raise ValueError(f"未知的寫入 Key '{key}'")
+        setting, target_addr = self._find_setting(key)
 
         # ✅ [Fix V2.4R] 強制數值轉型
         try:
@@ -204,21 +304,31 @@ class Adapter:
                 value = 0
 
         try:
-            int_val = int(round(float(value) * scale))
+            scaled_value = float(value) * scale
         except (TypeError, ValueError):
             raise ValueError(f"寫入值無效: {value!r} (型別: {type(value).__name__})")
+        if not math.isfinite(scaled_value):
+            raise ValueError(f"寫入值必須是有限數值: {value!r}")
 
         if fc == 6:
+            int_val = self._coerce_legacy_16bit(scaled_value)
             base = struct.pack('>BBHH', self.uid, 0x06, target_addr, int_val & 0xFFFF)
             return base + calc_crc16(base)
         elif fc == 5:
+            int_val = self._coerce_legacy_16bit(scaled_value)
             coil_val = 0xFF00 if int_val else 0x0000
             base = struct.pack('>BBHH', self.uid, 0x05, target_addr, coil_val)
             return base + calc_crc16(base)
         elif fc == 16:
-            # 🚨 補齊 FC16 (0x10) 寫入單一暫存器 (Write Multiple Registers, Count=1) 封包格式: [UID] [10] [Addr_H] [Addr_L] [RegCount_H] [RegCount_L] [ByteCount] [Data_H] [Data_L]
-            base = struct.pack('>BBHHB', self.uid, 0x10, target_addr, 1, 2) + struct.pack('>H', int_val & 0xFFFF)
-            return base + calc_crc16(base)
+            codec = self._resolve_fc16_codec(setting, key)
+            if codec:
+                return self._build_fc16_request(
+                    target_addr,
+                    self._encode_fc16_32bit_value(scaled_value, codec),
+                )
+            # Legacy FC16 count=1 packet layout remains exactly unchanged.
+            int_val = self._coerce_legacy_16bit(scaled_value)
+            return self._build_fc16_request(target_addr, struct.pack('>H', int_val & 0xFFFF))
         else:
             raise NotImplementedError(f"尚不支援功能碼 FC {fc} 組裝")
 
@@ -236,8 +346,18 @@ class Adapter:
 
             if read_fc in (0x03, 0x04):
                 if len(raw_data) >= 7:
-                    chunk = raw_data[3:5]
-                    val   = struct.unpack('>H', chunk)[0]
+                    codec = context.get("codec") if context.get("strict_verify") else None
+                    if codec:
+                        chunk = raw_data[3:3 + codec["data_bytes"]]
+                        val = self._unpack_value(chunk, codec["datatype"], codec["word_order"])
+                        if val is None:
+                            raise DataDecodeError("FC16 multi-register verify 無法解碼")
+                    else:
+                        # Do not tighten this legacy path: valid longer frames
+                        # from the intentional dual-master test must retain the
+                        # historical first-register comparison behaviour.
+                        chunk = raw_data[3:5]
+                        val   = struct.unpack('>H', chunk)[0]
                     for cfg in self.settings.values():
                         if cfg['key'] == key:
                             scale       = cfg.get("scale", 1.0)
@@ -398,8 +518,18 @@ class Adapter:
                                       expected_data_bytes=cmd.get('expected_data_bytes'),
                                       expected_count=cmd.get('count'))
         elif ctx_type == "verify":
-            self._verify_modbus_frame(raw_data,
-                                      expected_fc=context.get("read_fc", 0x03))
+            if context.get("strict_verify"):
+                self._verify_modbus_frame(
+                    raw_data,
+                    expected_fc=context.get("read_fc", 0x03),
+                    expected_data_bytes=context.get("expected_data_bytes"),
+                    expected_count=context.get("expected_count"),
+                )
+            else:
+                # 027 hard regression boundary: retain historical legacy verify
+                # behaviour for verify_count omitted or equal to one.
+                self._verify_modbus_frame(raw_data,
+                                          expected_fc=context.get("read_fc", 0x03))
 
         result = self._extract_data(raw_data, context)
 
