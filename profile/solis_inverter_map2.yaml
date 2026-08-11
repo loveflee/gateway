@@ -109,7 +109,8 @@ sensors:
 #  - {key: "battery_soc", command_id: "read_meter_battery_a", offset: 15, length: 2, datatype: "uint16", scale: 1} # 33139
 #  - {key: "battery_soh", command_id: "read_meter_battery_a", offset: 17, length: 2, datatype: "uint16", scale: 1} # 33140
   - {key: "household_load_power", command_id: "read_meter_battery_b", offset: 3, length: 2, datatype: "uint16", scale: 1} # 33147
-  - {key: "backup_load_power", command_id: "read_meter_battery_b", offset: 5, length: 2, datatype: "uint16", scale: 1} # 33148
+#  - {key: "backup_load_power", command_id: "read_meter_battery_b", offset: 5, length: 2, datatype: "uint16", scale: 1} # 33148
+  - {key: "backup_load_power", command_id: "read_meter_battery_b", offset: 5, length: 2, datatype: "int16", scale: 1} # 33148 036_report
   - {key: "battery_power", command_id: "read_meter_battery_b", offset: 7, length: 4, datatype: "int32", scale: 1} # 33149-33150
 
   # === read_faults (33116 開始) 各自獨立的故障/狀態碼，非位元遮罩 ===
