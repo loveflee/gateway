@@ -14,6 +14,7 @@
 | 位置 | 用途 |
 | --- | --- |
 | `src/main.py` | Gateway 啟動入口與生命週期組裝；容器實際執行 `python /app/src/main.py`。 |
+| `src/adapter_catalog.py` | Adapter 探索的共用實作。`load_adapters()` 供 main.py runtime 使用（保留原啟動日誌語意），`discover_adapter_catalog()` 供 WebUI 唯讀查詢；**掃描過程不建立 Gateway、Driver、MQTT 或 WebUI**。 |
 | `src/` | 主動／監聽 Driver、BusMaster、MQTT、HA Discovery、Web UI、profile validator 等 production 程式。 |
 | `adapters/` | 可載入的設備協定 Adapter；容器內掛載為 `/app/src/adapters`。 |
 | `profile/config.yaml` | runtime 設定：driver、MQTT、bus 與裝置的 adapter／profile／mode。 |
@@ -23,7 +24,7 @@
 | `old_data/` | 歷史材料，不是目前 runtime 或驗收依據。 |
 | `build.sh`、`restart.sh`、`up.sh`、`down.sh`、`log.sh`、`it.sh` | 已有 Docker 操作捷徑；只在 repository root 執行。 |
 
-`src/` 以 asyncio 為核心：`EdgeGateway` 載入設定、Adapter、Driver、MQTT 與 HA Manager；主動設備交給 `BusMasterScheduler` 輪詢與寫入，監聽設備交給 `ListenMasterDispatcher`。主動寫入鏈是 MQTT command → BusMaster → Adapter encode → Driver ACK → verify read → Adapter decode。HA Discovery、state、availability 與 health 均透過 MQTT 發布；`src/web_admin.py` 提供有 HTTP Basic 驗證的 Web UI、設定備份／還原、隔離清單與 traffic 查閱。
+`src/` 以 asyncio 為核心：`EdgeGateway` 載入設定、Adapter、Driver、MQTT 與 HA Manager；主動設備交給 `BusMasterScheduler` 輪詢與寫入，監聽設備交給 `ListenMasterDispatcher`。主動寫入鏈是 MQTT command → BusMaster → Adapter encode → Driver ACK → verify read → Adapter decode。HA Discovery、state、availability 與 health 均透過 MQTT 發布；`src/web_admin.py` 提供有 HTTP Basic 驗證的 Web UI、設定備份／還原、隔離清單與 traffic 查閱，並以 `GET /api/catalog` 回傳目前可用的 adapter 名稱與 profile 清單（含單一外掛載入失敗的 warning，不會讓整份 catalog 失效）。
 
 ## 3. Runtime、Docker 與重啟
 
@@ -55,11 +56,13 @@
 
 ## 4. Adapter 合約與 GenericAdapter 現況
 
-Adapter loader 位於 `src/main.py::load_adapters()`：只掃描 `/app/src/adapters` 的**頂層** Python module，忽略 package，且檔名必須以 `_adapter.py` 結尾。module 必須提供 `ADAPTER_NAME` 與 `Adapter` class；名稱以小寫註冊，重複名稱會拒絕載入。不要把可載入 Adapter 放進子目錄或使用不符命名的檔案。
+Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapter_catalog import load_adapters` 取用，WebUI 則走 `discover_adapter_catalog()`。兩者共用同一套規則：只掃描 `/app/src/adapters` 的**頂層** Python module，忽略 package，且檔名必須以 `_adapter.py` 結尾。module 必須提供 `ADAPTER_NAME` 與 `Adapter` class；名稱以小寫註冊，重複名稱會拒絕載入。不要把可載入 Adapter 放進子目錄或使用不符命名的檔案。
 
 - 主動模式 Adapter 必須實作 `encode_write(key, value)`、`build_verify_read(key)`、`build_poll_read()`、`decode(raw_data, context)`。
 - 監聽模式另依 `feed()` 處理串流。Adapter 內應保持無阻塞、無網路 I/O 的解析／編碼邏輯，避免阻塞監聽解碼執行緒。
-- 現有 Adapter 包含 Generic Modbus、JKBMS、Modbus TCP 與 ST inverter；新增或修改前先確認實際 `ADAPTER_NAME`、mode 與 profile 的組合。
+- 現有 Adapter 包含 Generic Modbus（`rtu`）、Modbus TCP（`tcp`）、JKBMS（`jkbms`）、ST inverter（`st_inverter`）與 Solis 語意層（`solis_inverter`）；新增或修改前先確認實際 `ADAPTER_NAME`、mode 與 profile 的組合。
+
+`adapters/solis_inverter_adapter.py` 是**疊加式 Adapter 的範本**：它繼承 `GenericAdapter`，只覆寫 `decode()`，在 `super().decode()` 之後、且僅當 context 為 poll 且 command id 相符時，替 43110 補上唯讀中文語意欄位。它**不實作** Modbus、CRC、transport、ACK、write、reconnect 或 scheduling。要為特定廠商加語意時沿用此模式：先讓 GenericAdapter 完成標準解碼，再疊加，不要複製一份協定實作。
 
 目前 working tree 的 `adapters/generic_adapter.py` 可證實：讀取支援 FC01、FC02、FC03、FC04；寫入支援 FC05、FC06、FC16。FC16 的既有單 register 路徑保持 quantity=1；當 setting 能以 `link_sensor` 優先、同名 sensor 次之，明確解析到 4-byte 的 `uint32`、`int32` 或 `float32` metadata 時，才走 quantity=2 的 32-bit 寫入與嚴格 verify read。32-bit write 的現有 order 為 `big`、`little`、`swap`／`word_swap`、`byte_swap`；沒有可明確推導的 metadata 時必須維持 legacy 16-bit 行為，不可猜測。
 
@@ -72,6 +75,8 @@ Adapter loader 位於 `src/main.py::load_adapters()`：只掃描 `/app/src/adapt
 ## 5. Profile、設定與秘密資料
 
 - `profile/config.yaml` 是 runtime config；裝置的 `profile:` 值由 Gateway 在 `/app/profile` 以 `<name>.yaml` 載入（找不到 YAML 才嘗試同名 Python module）。地圖檔不是可任意交換的範例資料。
+- **雙向量必須宣告為有號型別。** 現行 Solis 地圖的既定慣例是：可正可負的量（`active_power`／`meter_active_power`／`battery_power` 用 `int32`，`battery_current`／`inverter_temp`／`backup_load_power` 用 `int16`），只增不減的量才用 `uint16`。把有號暫存器誤宣告為 `uint16` 的症狀是 HA 出現 `6xxxx` 這種物理上不可能的數值（`0xFFxx` 被當正數）。新增功率／電流／溫度點位時先確認雙向性，不要預設 unsigned。
+- 同一組地圖可能存在多份變體（例如 `solis_inverter_map.yaml` 與 `solis_inverter_map2.yaml`、`6k2*.yaml`）。修正某個 sensor 的 datatype 時，要確認**目前 `config.yaml` 實際掛載的是哪一份**；只改其中一份會讓其他變體保留舊錯誤，日後切換 profile 即復發。
 - 地圖靜態驗證使用現有 validator。容器運行時可用：
 
   ```bash

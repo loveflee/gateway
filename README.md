@@ -43,10 +43,11 @@ flowchart TB
 | 通訊 Driver | `src/driver.py`、`src/listen_driver.py`、`src/local_serial_driver.py` | TCP／RS485 Gateway／Serial 的連線、讀寫、斷線與重連；不負責設備欄位意義。 |
 | 主動調度 | `src/bus_master.py` | 單一總線上的輪詢、寫入、回讀驗證、重試與 online/offline 狀態。 |
 | 被動調度 | `src/listen_master.py` | 將持續收到的 raw byte stream 派給監聽 adapter、做 diff 發布與離線判定。 |
+| Adapter 探索 | `src/adapter_catalog.py` | 掃描 `adapters/` 並回傳可用外掛；runtime 與 WebUI catalog 共用同一套規則，掃描本身無啟動副作用。 |
 | 協定轉譯 | `adapters/*_adapter.py` | 產生 request、切包、驗證、解碼為鍵值資料；只有頂層 `*_adapter.py` 會被自動發現。 |
 | 設備／HA 地圖 | `profile/*.yaml` | Modbus command、sensor offset、縮放、設定與 HA Discovery 定義。 |
 | 北向發布 | `src/mqtt_client.py`、`src/ha_manager.py` | MQTT 連線、Discovery、state、availability 與重連後重發。 |
-| 管理介面 | `src/web_admin.py`、`src/index.html` | WebUI 設定編輯、備份／還原、traffic 與 sniffer 操作。 |
+| 管理介面 | `src/web_admin.py`、`src/index.html` | WebUI 設定編輯、備份／還原、adapter／profile catalog、traffic 與 sniffer 操作。 |
 
 ## `.env`：只放秘密
 
@@ -102,10 +103,12 @@ driver:
 devices:
   - uid: 1
     adapter: rtu
-    profile: solis_inverter_map
+    profile: solis_inverter_map2
     mode: active
-    poll_interval: 15
+    poll_interval: 6
 ```
+
+`poll_interval` 是**每個 read command** 的間隔，不是整台設備的刷新週期。地圖若有 15 條 `read_commands`，`poll_interval: 6` 代表單台完整刷新一輪約需 90 秒。把它調小會等比例增加總線負載，在多主站環境下要一併確認 `inter_frame_delay` 仍足以滿足設備的 turnaround 要求。
 
 ### Master 的邊界
 
@@ -152,9 +155,41 @@ devices:
 - Listen 首次連線失敗不會使整個網關退出：WebUI、MQTT 與 health 保持運作，監聽 Driver 依退避機制重連，第一個有效幀才恢復設備 online。
 - 監聽解碼超時有保險絲與鎖定機制；這是為了避免壞 adapter 長期耗盡 worker，不代表它能修復外部總線或設備韌體問題。
 
+## Adapter：標準協定與廠商語意疊加
+
+Adapter 由 `src/adapter_catalog.py` 掃描 `adapters/` 取得；檔名必須是 `*_adapter.py`，並定義 `ADAPTER_NAME` 與 `Adapter`。WebUI 可透過 `GET /api/catalog` 查詢目前可用的 adapter 與 profile；單一外掛載入失敗只會回報 warning，不會讓整份清單失效。
+
+| `ADAPTER_NAME` | 檔案 | 用途 |
+|---|---|---|
+| `rtu` | `generic_adapter.py` | 通用 Modbus：讀 FC01–04，寫 FC05／06／16（16-bit；metadata 可明確推導時支援 32-bit）。 |
+| `tcp` | `modbus_tcp_adapter.py` | 原生 Modbus TCP（MBAP 框架）。 |
+| `jkbms` | `jkbms_adapter.py` | JK BMS 被動旁聽切包。 |
+| `st_inverter` | `st_inverter_adapter.py` | 另一家逆變器族系。 |
+| `solis_inverter` | `solis_inverter_adapter.py` | Solis 語意疊加層。 |
+
+`solis_inverter_adapter.py` 示範**疊加式 Adapter**：它繼承 `GenericAdapter`，只覆寫 `decode()`，在標準解碼完成後替 43110 補上唯讀的中文儲能模式欄位；不自行實作 Modbus、CRC、transport、ACK 或 write。要為特定廠商加語意時建議沿用此模式，而不是複製一份協定實作。
+
 ## 設定、Profile 與救援模式
 
 `profile/config.yaml` 是可由 WebUI 修改的非機密執行設定；每個設備的 profile 位於 `profile/*_map.yaml`。
+
+### 有號／無號的判讀慣例
+
+功率、電流、溫度這類**可正可負**的量必須宣告為有號型別，否則負值會被當成極大的正數。現行 Solis 地圖的慣例：
+
+```yaml
+# 雙向量 → 有號
+- {key: "active_power",       datatype: "int32"}   # 33079
+- {key: "battery_power",      datatype: "int32"}   # 33149-33150
+- {key: "battery_current",    datatype: "int16", scale: 10}  # 33134（放電為負）
+- {key: "backup_load_power",  datatype: "int16"}   # 33148
+- {key: "inverter_temp",      datatype: "int16", scale: 10}  # 33093
+
+# 只增不減 → 無號
+- {key: "household_load_power", datatype: "uint16"}  # 33147
+```
+
+典型症狀：HA 出現 `65,4xx W` 這種對 6 kW 機種物理上不可能的數值，代表 `0xFFxx`（負值的 two's complement）被當成 `uint16`。同一組地圖若有多個變體（`solis_inverter_map.yaml`、`solis_inverter_map2.yaml`、`6k2*.yaml`），修正 datatype 時要確認目前 `config.yaml` 實際掛載的是哪一份。
 
 修改 profile 後先驗證：
 
