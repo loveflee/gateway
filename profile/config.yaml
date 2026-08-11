@@ -20,25 +20,25 @@ driver:
 devices:
   - uid: 1
     device_type: 6k_inverter
-    adapter: rtu
-    profile: solis_inverter_map
+    adapter: solis_inverter
+    profile: solis_inverter_map2
     poll_interval: 10
     mode: active
   - uid: 2
     device_type: 6k_inverter
-    adapter: rtu
-    profile: solis_inverter_map
+    adapter: solis_inverter
+    profile: solis_inverter_map2
     poll_interval: 10
     mode: active
   - uid: 3
     device_type: 6k_inverter
-    adapter: rtu
-    profile: solis_inverter_map
+    adapter: solis_inverter
+    profile: solis_inverter_map2
     poll_interval: 10
     mode: active
   - uid: 4
     device_type: 6k_inverter
-    adapter: rtu
-    profile: solis_inverter_map
+    adapter: solis_inverter
+    profile: solis_inverter_map2
     poll_interval: 10
     mode: active

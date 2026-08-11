@@ -1,5 +1,5 @@
 # =============================================================================
-# web_admin.py - V6.6 終極側錄版 (支援 Sniffer 獨占 + 總線即時唯讀側錄)
+# web_admin.py - V6.7 終極側錄版 (支援 Sniffer 獨占 + 總線即時唯讀側錄)
 # 修復歷程：
 #   - [V6.1] restore 改用與 save 相同的原子替換路徑。原本 /api/restore 直接
 #            shutil.copy2(BACKUP_PATH, CONFIG_PATH) 覆寫目標，複製途中若斷電或
@@ -37,6 +37,9 @@
 #   - [V6.6] WebUI 與 MQTT 帳密改由容器環境變數提供：WEB_USER／WEB_PASS 與
 #            MQTT_USERNAME／MQTT_PASSWORD。拒絕將 MQTT 帳密寫入 config.yaml；還原舊
 #            備份時自動移除其舊欄位，避免秘密重新落盤。
+#   - [V6.7] Adapter／Profile 下拉改讀唯讀 catalog：Adapter 與 Gateway 啟動共用
+#            同一外掛 discovery helper；Profile 掃描現有 .yaml 地圖。catalog 不收緊
+#            config 驗證，且前端保留既有但已無法發現的值，避免救援設定被下拉選單吃掉。
 # =============================================================================
 import yaml, os, signal, threading, time, secrets, fcntl, shutil, math
 import asyncio, concurrent.futures
@@ -45,6 +48,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
+from adapter_catalog import discover_adapter_catalog
 
 _sniffer_lock = threading.Lock()
 app = FastAPI()
@@ -53,6 +57,7 @@ CONFIG_PATH   = "/app/profile/config.yaml"
 BACKUP_PATH   = "/app/profile/config.yaml.bak"
 LOCAL_JS_PATH = "/app/profile/js-yaml.min.js"
 LOCK_PATH     = CONFIG_PATH + ".lock"
+PROFILE_DIR   = os.path.dirname(CONFIG_PATH)
 
 # 🚨 指定分拆出去的 HTML 檔案路徑 (與 web_admin.py 在同一目錄)
 INDEX_HTML_PATH = os.path.join(os.path.dirname(__file__), "index.html")
@@ -296,6 +301,41 @@ def get_config():
         return {"yaml_content": ""}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return {"yaml_content": f.read()}
+
+
+def _discover_profiles() -> tuple[list[str], list[str]]:
+    """列出可選地圖名稱，不驗證也不改變 runtime 對 profile 的彈性。"""
+    profiles = []
+    warnings = []
+    config_name = os.path.basename(CONFIG_PATH)
+    try:
+        with os.scandir(PROFILE_DIR) as entries:
+            for entry in entries:
+                name = entry.name
+                if (not entry.is_file() or name == config_name or not name.endswith(".yaml")
+                        or name.startswith(".") or ".bak." in name or ".tmp." in name):
+                    continue
+                profiles.append(name[:-5])
+    except OSError as exc:
+        warnings.append(f"無法讀取 Profile 目錄：{exc}")
+    return sorted(profiles), warnings
+
+
+@app.get("/api/catalog", dependencies=[Depends(require_auth)])
+def get_catalog():
+    """WebUI 唯讀選項 catalog；故障退化為 warning，絕不修改設定或重啟。"""
+    result = {"adapters": [], "profiles": [], "warnings": []}
+    try:
+        adapter_catalog = discover_adapter_catalog()
+        result["adapters"] = adapter_catalog.get("adapters", [])
+        result["warnings"].extend(adapter_catalog.get("warnings", []))
+    except Exception as exc:
+        result["warnings"].append(f"Adapter catalog 掃描失敗：{exc}")
+
+    profiles, profile_warnings = _discover_profiles()
+    result["profiles"] = profiles
+    result["warnings"].extend(profile_warnings)
+    return result
 
 @app.post("/api/config", dependencies=[Depends(require_auth)])
 def save_config(payload: dict):

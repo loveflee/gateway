@@ -136,6 +136,7 @@ input:checked + .slider:before { transform: translateX(16px); }
 <div class="wrap">
   <div id="qbanner" class="qbanner"></div>
   <div class="status" id="st"></div>
+  <div class="status" id="catalog-warning"></div>
 
   <!-- ── 系統設定 ── -->
   <div class="sec" id="s-sys">
@@ -382,6 +383,7 @@ input:checked + .slider:before { transform: translateX(16px); }
 let devCount = 0;
 let rawConfigObj = {};
 let sniffHistory = []; // 用於保存 Sniffer 日誌狀態
+let deviceCatalog = {adapters: [], profiles: []};
 
 const $  = id => document.getElementById(id);
 const st = (msg, cls) => { const el=$('st'); el.textContent=msg; el.className='status show '+cls; if(cls==='ok') setTimeout(()=>el.classList.remove('show'),4000); };
@@ -421,6 +423,59 @@ function onLisType() {
   $('lis-usb').style.display = t === 'usb' ? '' : 'none';
 }
 
+function setCatalogWarning(message) {
+  const el = $('catalog-warning');
+  if (!el) return;
+  if (!message) { el.textContent = ''; el.className = 'status'; return; }
+  el.textContent = '⚠️ ' + message;
+  el.className = 'status show wn';
+}
+
+function setCatalogOptions(select, values, currentValue, missingLabel) {
+  const current = currentValue == null ? '' : String(currentValue);
+  const options = [...new Set((Array.isArray(values) ? values : [])
+    .filter(value => typeof value === 'string' && value.length > 0))].sort();
+  select.replaceChildren();
+  if (missingLabel === 'Profile') select.add(new Option('請選擇 Profile', ''));
+  options.forEach(value => select.add(new Option(value, value)));
+  if (current && !options.includes(current)) {
+    select.add(new Option(`${current}（目前未發現）`, current));
+  }
+  select.value = current;
+}
+
+function applyCatalogToDevice(card, adapterValue, profileValue) {
+  const adapter = card.querySelector('.d-adapter');
+  const profile = card.querySelector('.d-profile');
+  setCatalogOptions(adapter, deviceCatalog.adapters, adapterValue, 'Adapter');
+  setCatalogOptions(profile, deviceCatalog.profiles, profileValue, 'Profile');
+}
+
+function refreshCatalogOptions() {
+  document.querySelectorAll('.dev-card').forEach(card => {
+    applyCatalogToDevice(card,
+      card.querySelector('.d-adapter').value,
+      card.querySelector('.d-profile').value);
+  });
+}
+
+async function loadCatalog() {
+  try {
+    const response = await fetch('/api/catalog');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const catalog = await response.json();
+    if (!Array.isArray(catalog.adapters) || !Array.isArray(catalog.profiles)) {
+      throw new Error('catalog 回應格式不正確');
+    }
+    deviceCatalog = {adapters: catalog.adapters, profiles: catalog.profiles};
+    refreshCatalogOptions();
+    setCatalogWarning((catalog.warnings || []).join('；'));
+  } catch (error) {
+    // 不清空現有欄位；未知值暫存 option 與 Raw YAML 仍可作為救援路徑。
+    setCatalogWarning(`無法取得 Adapter／Profile 清單（${error.message}）。目前設定與 Raw YAML 仍可編輯。`);
+  }
+}
+
 function addDevice(d){
   devCount++;
   const id = 'dev-'+devCount;
@@ -436,15 +491,10 @@ function addDevice(d){
       <div class="field"><label>Device Type</label><input class="d-type" type="text" value="${d&&d.device_type?d.device_type:''}"></div>
       <div class="field"><label>Adapter</label>
         <div class="sel-wrap">
-          <select class="d-adapter">
-            <option value="rtu">generic (RTU)</option>
-            <option value="tcp">tcp (Modbus TCP)</option>
-            <option value="jkbms">jkbms (旁路監聽)</option>
-            <option value="ampinvt">ampinvt (私有協議)</option>
-          </select>
+          <select class="d-adapter"></select>
         </div>
       </div>
-      <div class="field"><label>Profile (地圖檔名)</label><input class="d-profile" type="text" value="${d&&d.profile?d.profile:''}"></div>
+      <div class="field"><label>Profile (地圖檔名)</label><div class="sel-wrap"><select class="d-profile"></select></div></div>
       <div class="field"><label>Poll Interval</label><input class="d-interval" type="number" min="1" value="${d&&d.poll_interval!=null?d.poll_interval:10}"></div>
       <div class="field"><label>模式</label>
         <div class="sel-wrap">
@@ -456,8 +506,10 @@ function addDevice(d){
       </div>
     </div>`;
   $('dev-list').appendChild(div);
+  const adapterValue = d && d.adapter ? d.adapter : 'rtu';
+  const profileValue = d && d.profile ? d.profile : '';
+  applyCatalogToDevice(div, adapterValue, profileValue);
   if(d){
-    if (d.adapter) div.querySelector('.d-adapter').value = d.adapter;
     if (d.mode)    div.querySelector('.d-mode').value = d.mode;
   }
   reindex();
@@ -811,9 +863,10 @@ async function checkQuarantine() {
     } catch (e) { /* 告警查詢失敗不得影響主畫面 */ }
 }
 
-function waitAndLoad(retry) {
+async function waitAndLoad(retry) {
     if (typeof jsyaml !== 'undefined') {
-        loadConfig();
+        await loadCatalog();
+        await loadConfig();
         checkQuarantine();
         setTimeout(checkSnifferMode, 500);
     } else if (retry > 0) {

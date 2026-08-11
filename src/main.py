@@ -81,7 +81,6 @@ import sys
 import time
 import os
 import math
-import pkgutil
 import threading
 
 from web_admin import start_webui
@@ -92,6 +91,7 @@ from ha_manager import HAManager
 from modbus_tcp_driver import AsyncModbusTcpDriver
 from local_serial_driver import LocalSerialDriver
 from map_validator import validate_profile
+from adapter_catalog import load_adapters
 
 # [Listen Mode] 匯入監聽專用模組
 from listen_driver import AsyncListenTcpDriver
@@ -119,54 +119,8 @@ DRIVER_FACTORY = {
 # =============================================================================
 # Plugin Loader
 # =============================================================================
-def load_adapters() -> dict:
-    factory = {}
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    if current_dir not in sys.path:
-        sys.path.insert(0, current_dir)
-
-    adapters_dir = os.path.join(current_dir, "adapters")
-    if not os.path.exists(adapters_dir):
-        logger.warning(f"[AdapterLoader] 外掛目錄不存在: {adapters_dir}")
-        return factory
-
-    importlib.invalidate_caches()
-
-    required_base = ["ADAPTER_NAME", "Adapter"]
-
-    for _, module_name, ispkg in pkgutil.iter_modules([adapters_dir]):
-        if ispkg or not module_name.endswith("_adapter"):
-            continue
-
-        try:
-            module = importlib.import_module(f"adapters.{module_name}")
-
-            missing = [m for m in required_base if not hasattr(module, m)]
-            if missing:
-                logger.error(f"[AdapterLoader] 拒絕載入 {module_name}: 缺少必備屬性 {missing}")
-                continue
-
-            adapter_class = module.Adapter
-            if not isinstance(adapter_class, type):
-                logger.error(f"[AdapterLoader] 拒絕載入 {module_name}: 'Adapter' 不是一個 Class 類別")
-                continue
-
-            adapter_name = module.ADAPTER_NAME.lower()
-
-            if adapter_name in factory:
-                logger.error(f"[AdapterLoader] 拒絕載入 {module_name}: 命名衝突")
-                continue
-
-            factory[adapter_name] = adapter_class
-            logger.info(f"[AdapterLoader] ✅ 載入 adapter: [{adapter_name}] (來源: {module_name}.py)")
-
-        except Exception:
-            logger.exception(f"[AdapterLoader] 載入 {module_name} 崩潰，已跳過")
-
-    logger.info(f"[AdapterLoader] 掃描完畢，共掛載 {len(factory)} 個轉譯器外掛")
-    return factory
-
-ADAPTER_FACTORY = load_adapters()
+# 與 WebUI catalog 共用同一套 discovery 規則；helper 不建立 Gateway 或 transport。
+ADAPTER_FACTORY = load_adapters(logger=logger)
 
 # =============================================================================
 # EdgeGateway 核心邏輯
