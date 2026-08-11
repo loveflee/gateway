@@ -1,0 +1,228 @@
+# =======================================================
+# Device Profile: Solis Inverter 6K (5G/6G Series - 33000 Map)
+# Protocol: RS485 MODBUS RTU 型號： S6-EH1P6K (S6 世代單相混合儲能 6kW)
+#
+# 修正紀錄 (對照官方 Pho3niX90/solis_modbus 之 hybrid_sensors.py / status_mapping.py)：
+#   - [Critical] battery_current(33134) 改為 int16(有號)。原本 uint16 在放電
+#     (負電流) 時會因二補數誤判成上萬安培的離譜數值。
+#   - [Critical] 移除 fault_word_1(33096) 位元遮罩解讀。33096 官方定義其實是
+#     「鉛酸電池溫度」數值暫存器，不是故障位元組合，原本拆出的 5 個故障旗標
+#     讀的是溫度值的個別 bit，語意完全錯誤。改為正常數值型 lead_acid_battery_temp。
+#   - [Fix] 故障資訊改為直接讀 33116/33117/33120/33121 各自獨立的整數故障碼
+#     (跟既有 battery_fault_code@33118 / inverter_fault_code_1@33119 做法一致)。
+#   - [Fix] 補上 battery_soh(33140)：read_meter_battery_a 的 count 從 7 加到 8。
+#   - [Fix] 補上 meter_active_power(33130-33131)：新增 read_meter_power 讀取指令。
+#     這兩個 key 原本只存在於 B1_INFO 前端，後端沒有對應 sensor，是永遠讀不到值的孤兒欄位。
+#   - B3_STATUS_BITS 移除 fault_no_grid / fault_grid_ov1(來源已刪除)、
+#     fault_bus_ov(原本就沒有對應後端 sensor，同屬孤兒欄位)。
+#
+# 補點紀錄 (擴充相鄰暫存器範圍，零額外請求成本)：
+#   - read_grid count 8→12：新增 reactive_power(33081-82)/apparent_power(33083-84)
+#   - read_meter_power start 33130→33126, count 2→6：新增
+#     meter_total_active_energy(33126-27)/meter_voltage(33128)/meter_current(33129)
+#   - read_meter_battery_b start 33149→33147, count 2→4：新增即時負載功率
+#     household_load_power(33147)/backup_load_power(33148)
+#
+# 6k2p1 最小合併觀察版（2026-08-11）：
+#   - 僅合併完全相鄰的 33161–33180（原 read_energy2_a/b/c）。
+#   - 不讀取任何額外暫存器；其他 12 條讀取命令與原圖完全相同。
+#   - 各 energy2 sensor 的 command_id／offset 已依 33161 起點重算。
+# =======================================================
+
+device_info:
+  manufacturer: "Solis / Ginlong"
+  model: "6K Inverter"
+
+read_commands:
+  - {id: "read_energy", fc: 4, start_addr: 33029, count: 8}  # 33029-33036 (發電量)
+  - {id: "read_pv", fc: 4, start_addr: 33049, count: 4}      # 33049-33052 (PV 電壓電流)
+  - {id: "read_dc_power", fc: 4, start_addr: 33057, count: 2} # 33057 (總 DC 功率)
+  - {id: "read_grid", fc: 4, start_addr: 33073, count: 12}   # 33073-33084 (市電狀態、總功率、無功/視在功率)
+  - {id: "read_status", fc: 4, start_addr: 33093, count: 4}  # 33093-33096 (溫度、頻率、狀態碼、鉛酸電池溫度)
+  - {id: "read_meter_power", fc: 4, start_addr: 33126, count: 6} # 33126-33131 (電表累計電量/電壓/電流/瞬時功率)
+  - {id: "read_meter_battery_a", fc: 4, start_addr: 33133, count: 8} # 33133-33140 (電池電壓電流SOC/SOH)
+  - {id: "read_meter_battery_b", fc: 4, start_addr: 33147, count: 4} # 33147-33150 (家用/離網負載功率、電池功率)
+  - {id: "read_faults", fc: 4, start_addr: 33116, count: 6}    # 33116-33121 (各項獨立故障碼與狀態位元)
+  - {id: "read_energy2_all", fc: 4, start_addr: 33161, count: 20} # 33161-33180（完全相鄰，無額外暫存器）
+  - {id: "read_settings", fc: 3, start_addr: 43000, count: 12} # 43000-43011 (控制寫入)
+  - {id: "read_storage_control", fc: 3, start_addr: 43110, count: 1} # 43110 (儲能控制設定)
+  - {id: "read_batt_limits", fc: 3, start_addr: 43117, count: 2} # 43117-43118 (充放電電流限制)
+
+definitions:
+  value_maps:
+    map_work_status:
+      0: "等待狀態"
+      1: "開環運行"
+      2: "軟起運行"
+      3: "並網運行"
+      4: "離網運行"
+
+sensors:
+  # === read_energy (33029 開始) ===
+  - {key: "total_energy", command_id: "read_energy", offset: 3, length: 4, datatype: "uint32", scale: 1} # 33029-33030
+  - {key: "month_energy", command_id: "read_energy", offset: 7, length: 4, datatype: "uint32", scale: 1} # 33031-33032
+  - {key: "last_month_energy", command_id: "read_energy", offset: 11, length: 4, datatype: "uint32", scale: 1} # 33033-33034
+  - {key: "today_energy", command_id: "read_energy", offset: 15, length: 2, datatype: "uint16", scale: 10} # 33035
+  - {key: "yesterday_energy", command_id: "read_energy", offset: 17, length: 2, datatype: "uint16", scale: 10} # 33036
+
+  # === read_pv (33049 開始) ===
+  - {key: "pv1_voltage", command_id: "read_pv", offset: 3, length: 2, datatype: "uint16", scale: 10} # 33049
+  - {key: "pv1_current", command_id: "read_pv", offset: 5, length: 2, datatype: "uint16", scale: 10} # 33050
+  - {key: "pv2_voltage", command_id: "read_pv", offset: 7, length: 2, datatype: "uint16", scale: 10} # 33051
+  - {key: "pv2_current", command_id: "read_pv", offset: 9, length: 2, datatype: "uint16", scale: 10} # 33052
+
+  # === read_dc_power (33057) ===
+  - {key: "total_dc_power", command_id: "read_dc_power", offset: 3, length: 4, datatype: "uint32", scale: 1} # 33057
+
+  # === read_grid (33073 開始，涵蓋電壓、電流與有功功率) ===
+  - {key: "phase_a_voltage", command_id: "read_grid", offset: 3, length: 2, datatype: "uint16", scale: 10} # 33073
+  - {key: "phase_a_current", command_id: "read_grid", offset: 9, length: 2, datatype: "uint16", scale: 10} # 33076
+  - {key: "active_power", command_id: "read_grid", offset: 15, length: 4, datatype: "int32", scale: 1} # 33079
+  - {key: "reactive_power", command_id: "read_grid", offset: 19, length: 4, datatype: "int32", scale: 1} # 33081
+  - {key: "apparent_power", command_id: "read_grid", offset: 23, length: 4, datatype: "int32", scale: 1} # 33083
+
+  # === read_status (33093 開始) ===
+  - {key: "inverter_temp", command_id: "read_status", offset: 3, length: 2, datatype: "int16", scale: 10} # 33093
+  - {key: "grid_freq", command_id: "read_status", offset: 5, length: 2, datatype: "uint16", scale: 100} # 33094
+  - {key: "work_status", command_id: "read_status", offset: 7, length: 2, datatype: "uint16", map_profile: "map_work_status"} # 33095
+
+  - key: "work_status_bits"
+    command_id: "read_status"
+    offset: 7 # 33095
+    length: 2
+    bits:
+      - {bit: 0, id: "stat_run_normal", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "stat_run_stop", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "stat_run_fault", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "stat_run_derating", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+  # 33096：官方協定為「鉛酸電池溫度」數值暫存器 (原本誤判為 fault_word_1 故障位元遮罩，已修正)
+#  - {key: "lead_acid_battery_temp", command_id: "read_status", offset: 9, length: 2, datatype: "int16", scale: 10} # 33096
+
+  # === read_meter_power (33126 開始，電表累計電量/電壓/電流/瞬時功率) ===
+  - {key: "meter_total_active_energy", command_id: "read_meter_power", offset: 3, length: 4, datatype: "uint32", scale: 1000} # 33126-33127 (原始單位 Wh，除1000轉kWh)
+  - {key: "meter_voltage", command_id: "read_meter_power", offset: 7, length: 2, datatype: "uint16", scale: 10} # 33128
+  - {key: "meter_current", command_id: "read_meter_power", offset: 9, length: 2, datatype: "uint16", scale: 100} # 33129
+  - {key: "meter_active_power", command_id: "read_meter_power", offset: 11, length: 4, datatype: "int32", scale: 1} # 33130-33131
+
+  # === read_meter_battery 分拆防碰撞 ===
+  - {key: "battery_voltage", command_id: "read_meter_battery_a", offset: 3, length: 2, datatype: "uint16", scale: 10} # 33133
+  - {key: "battery_current", command_id: "read_meter_battery_a", offset: 5, length: 2, datatype: "int16", scale: 10} # 33134 (有號：放電為負)
+#  - {key: "battery_soc", command_id: "read_meter_battery_a", offset: 15, length: 2, datatype: "uint16", scale: 1} # 33139
+#  - {key: "battery_soh", command_id: "read_meter_battery_a", offset: 17, length: 2, datatype: "uint16", scale: 1} # 33140
+  - {key: "household_load_power", command_id: "read_meter_battery_b", offset: 3, length: 2, datatype: "uint16", scale: 1} # 33147
+  - {key: "backup_load_power", command_id: "read_meter_battery_b", offset: 5, length: 2, datatype: "uint16", scale: 1} # 33148
+  - {key: "battery_power", command_id: "read_meter_battery_b", offset: 7, length: 4, datatype: "int32", scale: 1} # 33149-33150
+
+  # === read_faults (33116 開始) 各自獨立的故障/狀態碼，非位元遮罩 ===
+  - {key: "grid_fault_code", command_id: "read_faults", offset: 3, length: 2, datatype: "uint16"} # 33116
+  - {key: "backup_fault_code", command_id: "read_faults", offset: 5, length: 2, datatype: "uint16"} # 33117
+  - {key: "battery_fault_code", command_id: "read_faults", offset: 7, length: 2, datatype: "uint16"} # 33118
+  - {key: "inverter_fault_code_1", command_id: "read_faults", offset: 9, length: 2, datatype: "uint16"} # 33119
+  - {key: "inverter_fault_code_2", command_id: "read_faults", offset: 11, length: 2, datatype: "uint16"} # 33120
+  - {key: "operating_status_bits", command_id: "read_faults", offset: 13, length: 2, datatype: "uint16"} # 33121
+
+  # === read_energy2_all (33161 開始；P1 合併) ===
+  # -- 總計歷史度數 (32-bit) --
+  - {key: "battery_charge_energy_total", command_id: "read_energy2_all", offset: 3, length: 4, datatype: "uint32", scale: 10} # 33161-33162
+  - {key: "battery_discharge_energy_total", command_id: "read_energy2_all", offset: 11, length: 4, datatype: "uint32", scale: 10} # 33165-33166
+  - {key: "grid_import_energy_total", command_id: "read_energy2_all", offset: 19, length: 4, datatype: "uint32", scale: 10} # 33169-33170
+  - {key: "grid_export_energy_total", command_id: "read_energy2_all", offset: 27, length: 4, datatype: "uint32", scale: 10} # 33173-33174
+  - {key: "load_consumption_energy_total", command_id: "read_energy2_all", offset: 35, length: 4, datatype: "uint32", scale: 10} # 33177-33178
+
+  # -- 今日度數 (16-bit) --
+  - {key: "battery_charge_energy_today", command_id: "read_energy2_all", offset: 7, length: 2, datatype: "uint16", scale: 10} # 33163
+  - {key: "battery_discharge_energy_today", command_id: "read_energy2_all", offset: 15, length: 2, datatype: "uint16", scale: 10} # 33167
+  - {key: "grid_import_energy_today", command_id: "read_energy2_all", offset: 23, length: 2, datatype: "uint16", scale: 10} # 33171
+  - {key: "grid_export_energy_today", command_id: "read_energy2_all", offset: 31, length: 2, datatype: "uint16", scale: 10} # 33175
+  - {key: "load_consumption_energy_today", command_id: "read_energy2_all", offset: 39, length: 2, datatype: "uint16", scale: 10} # 33179
+
+  # === read_settings (43000) ===
+  - {key: "set_switch", command_id: "read_settings", offset: 17, length: 2, datatype: "uint16", scale: 1} # 43007
+  - {key: "set_active_power_percent", command_id: "read_settings", offset: 23, length: 2, datatype: "uint16", scale: 1} # 43010
+
+  # === read_storage_control (43110 開始) ===
+  - {key: "set_storage_control", command_id: "read_storage_control", offset: 3, length: 2, datatype: "uint16"} # 43110
+
+  # === read_batt_limits (43117 開始) ===
+  - {key: "set_batt_max_charge_c", command_id: "read_batt_limits", offset: 3, length: 2, datatype: "uint16", scale: 10} # 43117
+  - {key: "set_batt_max_discharge_c", command_id: "read_batt_limits", offset: 5, length: 2, datatype: "uint16", scale: 10} # 43118
+
+settings:
+  43007: {key: "set_switch", write_fc: 16}
+  43010: {key: "set_active_power_percent", write_fc: 16, scale: 1}
+  43110: {key: "set_storage_control", write_fc: 16}
+  43117: {key: "set_batt_max_charge_c", write_fc: 16, scale: 10}
+  43118: {key: "set_batt_max_discharge_c", write_fc: 16, scale: 10}
+
+B1_INFO:
+  - {key: "work_status", name: "當前狀態", ha: {type: "sensor", icon: "mdi:state-machine"}}
+  - {key: "active_power", name: "有功功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "reactive_power", name: "無功功率", unit: "var", ha: {type: "sensor", device_class: "reactive_power", state_class: "measurement"}}
+  - {key: "apparent_power", name: "視在功率", unit: "VA", ha: {type: "sensor", device_class: "apparent_power", state_class: "measurement"}}
+  - {key: "total_dc_power", name: "總直流功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "pv1_voltage", name: "PV1 電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "pv1_current", name: "PV1 電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "pv2_voltage", name: "PV2 電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "pv2_current", name: "PV2 電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "phase_a_voltage", name: "市電電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "phase_a_current", name: "市電電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "meter_total_active_energy", name: "電表累計電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "meter_voltage", name: "電表電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "meter_current", name: "電表電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+  - {key: "meter_active_power", name: "電表總功率 (進出口)", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "household_load_power", name: "家用即時負載功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "backup_load_power", name: "離網負載功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "battery_voltage", name: "電池電壓", unit: "V", ha: {type: "sensor", device_class: "voltage", state_class: "measurement"}}
+  - {key: "battery_current", name: "電池電流", unit: "A", ha: {type: "sensor", device_class: "current", state_class: "measurement"}}
+#  - {key: "battery_soc", name: "電池剩餘電量", unit: "%", ha: {type: "sensor", device_class: "battery", state_class: "measurement"}}
+#  - {key: "battery_soh", name: "電池健康度", unit: "%", ha: {type: "sensor", device_class: "battery", state_class: "measurement"}}
+  - {key: "battery_power", name: "電池即時功率", unit: "W", ha: {type: "sensor", device_class: "power", state_class: "measurement"}}
+  - {key: "grid_freq", name: "電網頻率", unit: "Hz", ha: {type: "sensor", device_class: "frequency", state_class: "measurement"}}
+  - {key: "inverter_temp", name: "機身溫度", unit: "°C", ha: {type: "sensor", device_class: "temperature", state_class: "measurement"}}
+#  - {key: "lead_acid_battery_temp", name: "鉛酸電池溫度", unit: "°C", ha: {type: "sensor", device_class: "temperature", state_class: "measurement", entity_category: "diagnostic"}}
+  - {key: "today_energy", name: "今日發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "yesterday_energy", name: "昨日發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "month_energy", name: "本月發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "last_month_energy", name: "上月發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "total_energy", name: "總發電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+
+  - {key: "battery_charge_energy_today", name: "今日電池充電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "battery_discharge_energy_today", name: "今日電池放電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "grid_import_energy_today", name: "今日買電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "grid_export_energy_today", name: "今日賣電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "load_consumption_energy_today", name: "今日家用耗電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+
+  - {key: "battery_charge_energy_total", name: "總電池充電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "battery_discharge_energy_total", name: "總電池放電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "grid_import_energy_total", name: "總買電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "grid_export_energy_total", name: "總賣電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+  - {key: "load_consumption_energy_total", name: "總家用耗電量", unit: "kWh", ha: {type: "sensor", device_class: "energy", state_class: "total_increasing"}}
+
+  - {key: "grid_fault_code", name: "市電故障碼", ha: {type: "sensor", icon: "mdi:alert", entity_category: "diagnostic"}}
+  - {key: "backup_fault_code", name: "離網故障碼", ha: {type: "sensor", icon: "mdi:alert", entity_category: "diagnostic"}}
+  - {key: "battery_fault_code", name: "電池故障碼", ha: {type: "sensor", icon: "mdi:alert", entity_category: "diagnostic"}}
+  - {key: "inverter_fault_code_1", name: "逆變器故障碼1", ha: {type: "sensor", icon: "mdi:alert", entity_category: "diagnostic"}}
+  - {key: "inverter_fault_code_2", name: "逆變器故障碼2", ha: {type: "sensor", icon: "mdi:alert", entity_category: "diagnostic"}}
+  - {key: "operating_status_bits", name: "運行狀態位元", ha: {type: "sensor", icon: "mdi:information-outline", entity_category: "diagnostic"}}
+
+B3_STATUS_BITS:
+  stat_run_normal: {name: "正常運行中", ha: {type: "binary_sensor", icon: "mdi:check-circle", entity_category: "diagnostic"}}
+  stat_run_fault: {name: "故障停機", ha: {type: "binary_sensor", device_class: "problem", entity_category: "diagnostic"}}
+
+B2_SETTING:
+  - key: "set_switch"
+    name: "逆變器開關"
+    ha: {type: "switch", icon: "mdi:power", payload_on: "190", payload_off: "222"}
+  - key: "set_active_power_percent"
+    name: "有功功率限制 (%)"
+    ha: {type: "number", min: 0, max: 110, step: 1, mode: "slider", unit_of_measurement: "%", entity_category: "config"}
+  - key: "set_storage_control"
+    name: "儲能模式 (33:自用 35:分時)"
+    ha: {type: "number", min: 0, max: 65535, step: 1, mode: "box", entity_category: "config"}
+  - key: "set_batt_max_charge_c"
+    name: "最大充電電流限制"
+    ha: {type: "number", min: 0, max: 100, step: 0.1, mode: "slider", unit_of_measurement: "A", entity_category: "config"}
+  - key: "set_batt_max_discharge_c"
+    name: "最大放電電流限制"
+    ha: {type: "number", min: 0, max: 100, step: 0.1, mode: "slider", unit_of_measurement: "A", entity_category: "config"}
