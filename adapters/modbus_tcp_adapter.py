@@ -1,5 +1,5 @@
 # =============================================================================
-# modbus_tcp_adapter.py - V1.3
+# modbus_tcp_adapter.py - V1.4 FC15 補記版
 # 繼承自 GenericModbusAdapter，專為原生 Modbus TCP 設備設計
 #
 # 修復歷程：
@@ -14,6 +14,19 @@
 #        _encode_fc16_32bit_value / _coerce_legacy_16bit；FC05 與 FC06 的
 #        既有 bytes 與 context 完全不動。decode() 無需修改：它已把 strict_verify
 #        與 codec 透傳給父類的 _verify_modbus_frame 與 _extract_data。
+# V1.4 : [Doc] 追記 FC15 (Write Multiple Coils)。此能力隨 report/037-047 的
+#        FC15 施工一併落地於本檔，但當時檔頭未同步，導致「讀檔頭會得到原生
+#        TCP 路徑不支援 FC15」的錯誤結論。本版只補檔頭，程式碼零改動。
+#        實際實作位置與語意：
+#          - encode_write()：先以父類 _find_coil_group(key) 判斷該 key 是否屬於
+#            profile 的 coil_groups；命中則走 _prepare_coil_group_write() 取得
+#            (target_addr, vector)，再由父類 build_fc15_pdu() 產生 PDU、
+#            套上 MBAP 標頭。未命中才落回既有 FC05／FC06／FC16 分支。
+#          - build_verify_read()：群組 verify 強制走 FC01，且 verify command
+#            的位址範圍必須涵蓋整個群組，否則直接 ValueError。
+#          - build_fc15_pdu()／pack_coils_lsb_first() 由父類提供且為
+#            transport-neutral，本檔不重寫，只負責 MBAP 加框 —— 這是與 FC16
+#            必須自行重寫 encode_write() 的關鍵差異。
 # =============================================================================
 import struct
 import logging

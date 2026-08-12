@@ -5,6 +5,28 @@
 #                若型別錯誤 (非 list / 非 dict)，不再靜默 return，改為強制報警。
 #   - [Architecture] 達成 100% 結構與型別的 Fail-Fast，為 Adapter 提供絕對信任邊界。
 # 修復歷程 (V1.6 → V1.7)：
+#   - [Protocol] 追記：隨 report/037-047 的 FC15 施工新增 _check_coil_groups()，
+#                當時未同步檔頭，此處補記。coil_groups 是唯一會讓多顆 relay
+#                以單一幀原子切換的區塊，YAML 寫錯的代價是「一次動到不該動的
+#                點位」，故採全量 Fail-Fast，掛載期即攔截：
+#                  結構    groups 須為 dict；group key 須為非空字串；
+#                          每組須為 dict。
+#                  位址    start_addr／count 型別與範圍；start_addr + count
+#                          不得超過 65536。
+#                  成員    members 須為非空 list、不得重複、每個 member 都必須
+#                          存在於 settings，且必須保留自己的 FC05 單路設定
+#                          （群組寫入不得取消單點控制能力）；
+#                          count 必須等於 len(members)。
+#                  verify  verify_command_id 必須指向既有 read_commands、
+#                          必須是 FC01，且其位址範圍須涵蓋整個群組 ——
+#                          否則 verify 讀不到自己剛寫的 coil。
+#                  states  須為非空 dict；每個 state 長度須等於 count；
+#                          值只接受 bool／ON／OFF；同組內不得有重複的 coil
+#                          vector（否則回讀時無法反查是哪個 state）。
+#                  重疊    跨組共用同一顆 coil 位址一律拒絕。
+#                另於 settings 檢查加入 key 重複偵測 —— settings 是「以位址為
+#                鍵」的 dict，key 重複會讓 coil_groups 的 member → 位址對應
+#                取到不確定的那一筆。
 #   - [Critical] 封堵 report/052 的缺陷 F1（靜默資料消失）：sensors[].command_id
 #                若打錯字或指向不存在的 read_command，本檢查器原本放行，而
 #                generic_adapter._extract_data() 的輪詢分支以
