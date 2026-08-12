@@ -1,0 +1,90 @@
+# =======================================================
+# 8CH Relay FC15 profile — stable FC05 baseline plus non-overlapping live groups
+# =======================================================
+read_commands:
+  - id: "read_coils"
+    fc: 1
+    start_addr: 0
+    count: 8
+    response_len: 6
+
+sensors:
+  - key: "relay_status_byte"
+    command_id: "read_coils"
+    offset: 3
+    length: 1
+    bits:
+      - {bit: 0, id: "switch_0", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "switch_1", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "switch_2", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "switch_3", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "switch_4", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "switch_5", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "switch_6", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "switch_7", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+# Existing FC05 controls remain the only single-channel write path.
+settings:
+  0x0000: {key: "switch_0", write_fc: 5}
+  0x0001: {key: "switch_1", write_fc: 5}
+  0x0002: {key: "switch_2", write_fc: 5}
+  0x0003: {key: "switch_3", write_fc: 5}
+  0x0004: {key: "switch_4", write_fc: 5}
+  0x0005: {key: "switch_5", write_fc: 5}
+  0x0006: {key: "switch_6", write_fc: 5}
+  0x0007: {key: "switch_7", write_fc: 5}
+
+# Groups are profile data, not Adapter rules.  No group overlaps another group.
+coil_groups:
+  group_01:
+    start_addr: 0
+    count: 2
+    members: [switch_0, switch_1]
+    verify_command_id: read_coils
+    states:
+      all_off: [OFF, OFF]
+      all_on: [ON, ON]
+  group_234:
+    start_addr: 2
+    count: 3
+    members: [switch_2, switch_3, switch_4]
+    verify_command_id: read_coils
+    states:
+      all_off: [OFF, OFF, OFF]
+      pattern_101: [ON, OFF, ON]
+
+B1_INFO:
+  - key: "switch_0"
+    name: "繼電器 CH1"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_1"
+    name: "繼電器 CH2"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_2"
+    name: "繼電器 CH3"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_3"
+    name: "繼電器 CH4"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_4"
+    name: "繼電器 CH5"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_5"
+    name: "繼電器 CH6"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_6"
+    name: "繼電器 CH7"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+  - key: "switch_7"
+    name: "繼電器 CH8"
+    ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}
+
+B2_SETTING:
+  - key: group_01
+    name: "Relay Group 01"
+    # __UNMATCHED__ is display-only safety state.  Selecting it is rejected by
+    # the Adapter before any FC15 frame is built; it never performs a write.
+    ha: {type: select, options: [all_off, all_on, "__UNMATCHED__"], state_key: group_01, icon: "mdi:toggle-switch-outline"}
+  - key: group_234
+    name: "Relay Group 234"
+    ha: {type: select, options: [all_off, pattern_101, "__UNMATCHED__"], state_key: group_234, icon: "mdi:toggle-switch-outline"}

@@ -1,11 +1,19 @@
 # =============================================================================
-# modbus_tcp_adapter.py - V1.2
+# modbus_tcp_adapter.py - V1.3
 # 繼承自 GenericModbusAdapter，專為原生 Modbus TCP 設備設計
 #
 # 修復歷程：
 # 1. 修正 expected_len 為 +4 (MBAP 6 - CRC 2 = 4)。
 # 2. 補齊 Transaction ID 的 Context 傳遞與 _verify_modbus_frame 驗證。
 # 3. decode() 改為靜態呼叫 GenericModbusAdapter._extract_data，避開 MRO 陷阱。
+# V1.3 : [Protocol] 補上 FC16 (Write Multiple Registers)。本檔自行重寫了
+#        encode_write()／build_verify_read()，因此 GenericAdapter 的 FC16 能力
+#        不會自動出現在原生 TCP 路徑上 —— 原本對 write_fc:16 一律
+#        NotImplementedError，32-bit verify 也拿不到 codec 而退化成只比前 16 bits。
+#        本次只新增 FC16 分支，並直接重用父類已驗證的 _resolve_fc16_codec /
+#        _encode_fc16_32bit_value / _coerce_legacy_16bit；FC05 與 FC06 的
+#        既有 bytes 與 context 完全不動。decode() 無需修改：它已把 strict_verify
+#        與 codec 透傳給父類的 _verify_modbus_frame 與 _extract_data。
 # =============================================================================
 import struct
 import logging
@@ -53,6 +61,32 @@ class Adapter(GenericModbusAdapter):
         return req_bytes, {"type": "poll", "cmd": cmd, "tx_id": tx_id}
 
     def build_verify_read(self, key: str) -> tuple[bytes, dict]:
+        group = self._find_coil_group(key)
+        if group is not None:
+            group, command, state_name = self._build_coil_group_verify_spec(key)
+            try:
+                read_fc = int(command["fc"])
+                start_addr = int(command["start_addr"])
+                count = int(command["count"])
+            except (KeyError, TypeError, ValueError) as e:
+                raise ValueError(f"coil group '{key}' verify command 無效: {e}")
+            if read_fc != 0x01:
+                raise ValueError(f"coil group '{key}' verify 必須使用 FC01，收到 FC{read_fc}")
+            tx_id = self._get_next_tx_id()
+            pdu = struct.pack('>BHH', read_fc, start_addr, count)
+            return self._add_mbap_header(pdu, tx_id), {
+                "type": "verify",
+                "key": key,
+                "read_fc": read_fc,
+                "tx_id": tx_id,
+                "strict_verify": True,
+                "expected_data_bytes": (count + 7) // 8,
+                "expected_count": count,
+                "coil_group": group,
+                "group_state": state_name,
+                "verify_command": command,
+            }
+
         setting = None
         target_addr = None
         for addr_str, cfg in self.settings.items():
@@ -68,19 +102,39 @@ class Adapter(GenericModbusAdapter):
         read_fc = 0x01 if write_fc in (5, 15) else 0x03
         reg_count = setting.get("verify_count", 1)
 
+        # [V1.3] 只有能明確推導出 4-byte metadata 的 FC16 才進入 32-bit 嚴格 verify；
+        #        其餘一律維持既有 legacy 行為與 bytes。
+        codec = self._resolve_fc16_codec(setting, key) if int(write_fc) == 16 else None
+        if codec:
+            reg_count = codec["register_count"]
+
         pdu = struct.pack('>BHH', read_fc, target_addr, reg_count)
         tx_id = self._get_next_tx_id()
         req_bytes = self._add_mbap_header(pdu, tx_id)
 
         # 💡 [修復 2] 帶入 tx_id 供驗證
-        return req_bytes, {
+        context = {
             "type": "verify",
             "key": key,
             "read_fc": read_fc,
             "tx_id": tx_id
         }
+        if codec:
+            context.update({
+                "strict_verify": True,
+                "expected_data_bytes": codec["data_bytes"],
+                "expected_count": codec["register_count"],
+                "codec": codec,
+            })
+        return req_bytes, context
 #########
     def encode_write(self, key: str, value) -> bytes:
+        group = self._find_coil_group(key)
+        if group is not None:
+            target_addr, vector = self._prepare_coil_group_write(key, value)
+            tx_id = self._get_next_tx_id()
+            return self._add_mbap_header(self.build_fc15_pdu(target_addr, vector), tx_id)
+
         setting = None
         target_addr = None
         for addr_str, cfg in self.settings.items():
@@ -127,6 +181,19 @@ class Adapter(GenericModbusAdapter):
             # FC05 專屬邏輯：只要數值大於 0 就是 0xFF00 (開啟)，否則是 0x0000 (關閉)
             coil_val = 0xFF00 if int_val else 0x0000
             pdu = struct.pack('>BHH', 0x05, target_addr, coil_val)
+            return self._add_mbap_header(pdu, tx_id)
+        elif fc == 16:
+            # [V1.3] 與 GenericAdapter 相同的判準：只有 link_sensor（次之為同名
+            #        sensor）能明確解析出 4-byte uint32/int32/float32 且 word_order
+            #        合法時才走 quantity=2；metadata 不明確時維持 legacy 單暫存器。
+            codec = self._resolve_fc16_codec(setting, key)
+            if codec:
+                register_bytes = self._encode_fc16_32bit_value(float(value) * scale, codec)
+            else:
+                register_bytes = struct.pack('>H', self._coerce_legacy_16bit(int_val) & 0xFFFF)
+            pdu = (struct.pack('>BHHB', 0x10, target_addr,
+                               len(register_bytes) // 2, len(register_bytes))
+                   + register_bytes)
             return self._add_mbap_header(pdu, tx_id)
         else:
             raise NotImplementedError(f"TCP 尚不支援 FC {fc} 組裝")
@@ -179,6 +246,18 @@ class Adapter(GenericModbusAdapter):
         self._verify_modbus_frame(raw_data, expected_fc, expected_len, expected_tx_id)
 
         rtu_like = raw_data[6:] + calc_crc16(raw_data[6:])
+
+        # Native TCP validates its MBAP envelope above.  The FC15 group path also
+        # needs the same strict FC01 byte-count guarantee as GenericAdapter's RTU
+        # path before it reuses the normal full-board bit decoder.
+        if ctx_type == "verify" and context.get("strict_verify"):
+            GenericModbusAdapter._verify_modbus_frame(
+                self,
+                rtu_like,
+                expected_fc=context.get("read_fc", 0x03),
+                expected_data_bytes=context.get("expected_data_bytes"),
+                expected_count=context.get("expected_count"),
+            )
 
         # 💡 [修復 3] 直接調用父類的 extraction，避開 MRO 陷阱
         result = GenericModbusAdapter._extract_data(self, rtu_like, context)

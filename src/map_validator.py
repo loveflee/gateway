@@ -1,9 +1,21 @@
 # =============================================================================
-#version map_validator.py - V1.6 零侵入旁路地圖檢查器 (究極無死角版)
+#version map_validator.py - V1.7 零侵入旁路地圖檢查器 (究極無死角版)
 # 修復歷程 (V1.5 → V1.6)：
 #   - [Critical] 封堵頂層結構靜默放行漏洞：sensors/settings/read_commands
 #                若型別錯誤 (非 list / 非 dict)，不再靜默 return，改為強制報警。
 #   - [Architecture] 達成 100% 結構與型別的 Fail-Fast，為 Adapter 提供絕對信任邊界。
+# 修復歷程 (V1.6 → V1.7)：
+#   - [Critical] 封堵 report/052 的缺陷 F1（靜默資料消失）：sensors[].command_id
+#                若打錯字或指向不存在的 read_command，本檢查器原本放行，而
+#                generic_adapter._extract_data() 的輪詢分支以
+#                `sensor.get("command_id") != cmd['id']: continue` 略過它 ——
+#                該 sensor 對「每一個」command 都不相干，於是永遠不被解碼，
+#                且因為不計入 declared，V2.5 的「丟棄 N/M 個 sensor」彙總
+#                WARNING 也不會觸發。結果是：HA 實體照常建立卻永遠沒有數值，
+#                全程零日誌。此版新增 _check_sensor_command_refs()，把 sensor
+#                與 read_commands 的參照關係在掛載期就攔下來。
+#                本次只新增檢查，未更動任何既有檢查的判準與訊息；Adapter 與
+#                BusMaster 完全不動。
 # =============================================================================
 import logging
 
@@ -26,6 +38,8 @@ def validate_profile(profile_name: str, rmap) -> list[str]:
         frontend_keys = set()
         backend_keys = set()
         command_keys = set()
+        setting_by_key = {}
+        command_by_id = {}
 
         def _validate_ha_config(key: str, item: dict):
             ha_config = item.get("ha")
@@ -160,6 +174,15 @@ def validate_profile(profile_name: str, rmap) -> list[str]:
                     continue
                 key = cfg.get("key", addr_str)
 
+                try:
+                    addr = int(str(addr_str), 16) if isinstance(addr_str, str) else int(addr_str)
+                except (TypeError, ValueError):
+                    addr = None
+                if key in setting_by_key:
+                    errors.append(f"[{profile_name}] 💥 settings key '{key}' 重複，coil_groups 無法安全對應位址！")
+                else:
+                    setting_by_key[key] = (addr, cfg)
+
                 if "scale" in cfg:
                     try:
                         sc = float(cfg["scale"])
@@ -190,6 +213,7 @@ def validate_profile(profile_name: str, rmap) -> list[str]:
                 if cmd_id in command_keys:
                     errors.append(f"[{profile_name}] 💥 read_commands 致命錯誤：指令 ID '{cmd_id}' 發生重複碰撞！")
                 command_keys.add(cmd_id)
+                command_by_id[cmd_id] = cmd
                 
                 for int_field in ["fc", "start_addr", "count", "command_code", "response_len"]:
                     if int_field in cmd:
@@ -200,6 +224,174 @@ def validate_profile(profile_name: str, rmap) -> list[str]:
                         except (TypeError, ValueError):
                             errors.append(f"[{profile_name}] 💥 read_commands '{cmd_id}' 致命錯誤：{int_field} 必須是整數，收到 '{cmd[int_field]}'！")
 
+        def _check_sensor_command_refs(items, commands):
+            """封堵 F1：sensor 與 read_commands 的參照關係必須在掛載期成立。
+
+            必須在 _check_read_commands() 之後呼叫（command_by_id 才已填好）。
+            判準刻意保守，只攔「一定會造成靜默資料消失」的兩種情況：
+              1. profile 有 read_commands，但 sensor 的 command_id 缺漏或指不到；
+              2. profile 沒有 read_commands，sensor 卻宣告了 command_id。
+            監聽軌（feed() 型 adapter）的 profile 兩者皆無，不受影響。
+            """
+            if not items or not isinstance(items, list):
+                return
+
+            has_commands = isinstance(commands, list) and bool(commands)
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                main_key = item.get("key", f"index_{idx}")
+                cmd_id = item.get("command_id")
+
+                if not has_commands:
+                    if cmd_id:
+                        errors.append(
+                            f"[{profile_name}] 💥 sensors '{main_key}' 致命錯誤："
+                            f"宣告了 command_id '{cmd_id}'，但本 profile 沒有任何 read_commands！"
+                        )
+                    continue
+
+                if not cmd_id:
+                    errors.append(
+                        f"[{profile_name}] 💥 sensors '{main_key}' 致命錯誤："
+                        f"缺少 command_id，輪詢解碼會永遠略過它（該實體將永遠沒有數值）！"
+                    )
+                elif cmd_id not in command_by_id:
+                    errors.append(
+                        f"[{profile_name}] 💥 sensors '{main_key}' 致命錯誤："
+                        f"command_id '{cmd_id}' 不存在於 read_commands "
+                        f"（可用的有：{sorted(command_by_id)}），"
+                        f"輪詢解碼會永遠略過它（該實體將永遠沒有數值）！"
+                    )
+
+        def _check_coil_groups(groups):
+            """Validate profile-defined FC15 groups without changing legacy maps."""
+            if groups is None:
+                return
+            if not isinstance(groups, dict):
+                errors.append(f"[{profile_name}] 💥 coil_groups 格式錯誤：預期 dict，收到 {type(groups).__name__}！")
+                return
+
+            used_addresses = {}
+            for group_key, group in groups.items():
+                label = f"coil_groups.{group_key}"
+                if not isinstance(group_key, str) or not group_key:
+                    errors.append(f"[{profile_name}] 💥 coil_groups group key 必須是非空字串！")
+                if not isinstance(group, dict):
+                    errors.append(f"[{profile_name}] 💥 {label} 必須是 dict！")
+                    continue
+
+                try:
+                    if isinstance(group.get("start_addr"), bool):
+                        raise ValueError("bool 不是合法 address")
+                    start_addr = int(group["start_addr"])
+                    if not 0 <= start_addr <= 0xFFFF:
+                        raise ValueError("必須在 0..65535")
+                except (KeyError, TypeError, ValueError) as e:
+                    errors.append(f"[{profile_name}] 💥 {label}.start_addr 無效：{e}")
+                    start_addr = None
+
+                try:
+                    if isinstance(group.get("count"), bool):
+                        raise ValueError("bool 不是合法 count")
+                    count = int(group["count"])
+                    if not 1 <= count <= 2000:
+                        raise ValueError("必須在 1..2000")
+                except (KeyError, TypeError, ValueError) as e:
+                    errors.append(f"[{profile_name}] 💥 {label}.count 無效：{e}")
+                    count = None
+
+                if start_addr is not None and count is not None and start_addr + count > 0x10000:
+                    errors.append(f"[{profile_name}] 💥 {label} 位址超界：start_addr + count 超過 65536！")
+
+                members = group.get("members")
+                if not isinstance(members, list) or not members:
+                    errors.append(f"[{profile_name}] 💥 {label}.members 必須是非空 list！")
+                    members = []
+                if count is not None and len(members) != count:
+                    errors.append(f"[{profile_name}] 💥 {label}: count ({count}) 必須等於 members 長度 ({len(members)})！")
+                if len(set(members)) != len(members):
+                    errors.append(f"[{profile_name}] 💥 {label}.members 不得重複！")
+
+                for index, member in enumerate(members):
+                    if not isinstance(member, str) or not member:
+                        errors.append(f"[{profile_name}] 💥 {label}.members[{index}] 必須是非空 setting key！")
+                        continue
+                    member_info = setting_by_key.get(member)
+                    if member_info is None:
+                        errors.append(f"[{profile_name}] 💥 {label} member '{member}' 不存在於 settings！")
+                        continue
+                    member_addr, member_cfg = member_info
+                    if member_addr is None or start_addr is None or member_addr != start_addr + index:
+                        errors.append(
+                            f"[{profile_name}] 💥 {label}.members 必須按連續位址排列："
+                            f"'{member}' 位址 {member_addr}，預期 {None if start_addr is None else start_addr + index}！"
+                        )
+                    try:
+                        member_fc = int(member_cfg.get("write_fc", 6))
+                    except (TypeError, ValueError):
+                        member_fc = None
+                    if member_fc != 5:
+                        errors.append(f"[{profile_name}] 💥 {label} member '{member}' 必須保留 FC05 單路設定！")
+
+                verify_command_id = group.get("verify_command_id")
+                verify_command = command_by_id.get(verify_command_id)
+                if not isinstance(verify_command_id, str) or not verify_command:
+                    errors.append(f"[{profile_name}] 💥 {label}.verify_command_id 必須指向既有 read_commands！")
+                else:
+                    try:
+                        verify_fc = int(verify_command.get("fc"))
+                        verify_start = int(verify_command.get("start_addr"))
+                        verify_count = int(verify_command.get("count"))
+                        if verify_fc != 1:
+                            errors.append(f"[{profile_name}] 💥 {label}.verify_command_id 必須使用 FC01，收到 FC{verify_fc}！")
+                        if (start_addr is not None and count is not None
+                                and not (verify_start <= start_addr
+                                         and start_addr + count <= verify_start + verify_count)):
+                            errors.append(f"[{profile_name}] 💥 {label} 不在 verify command 的 FC01 位址範圍內！")
+                    except (TypeError, ValueError):
+                        errors.append(f"[{profile_name}] 💥 {label}.verify_command_id 指向的 command 位址/數量無效！")
+
+                states = group.get("states")
+                if not isinstance(states, dict) or not states:
+                    errors.append(f"[{profile_name}] 💥 {label}.states 必須是非空 dict！")
+                    states = {}
+                seen_vectors = set()
+                for state_name, vector in states.items():
+                    state_label = f"{label}.states.{state_name}"
+                    if not isinstance(state_name, str) or not state_name:
+                        errors.append(f"[{profile_name}] 💥 {label}.states key 必須是非空字串！")
+                    if not isinstance(vector, list):
+                        errors.append(f"[{profile_name}] 💥 {state_label} 必須是 list！")
+                        continue
+                    if count is not None and len(vector) != count:
+                        errors.append(f"[{profile_name}] 💥 {state_label} 長度必須等於 count ({count})！")
+                    normalized = []
+                    valid_vector = True
+                    for value in vector:
+                        if isinstance(value, bool):
+                            normalized.append(value)
+                        elif isinstance(value, str) and value.upper() in {"ON", "OFF"}:
+                            normalized.append(value.upper() == "ON")
+                        else:
+                            errors.append(f"[{profile_name}] 💥 {state_label} 只能使用 bool、ON 或 OFF，收到 {value!r}！")
+                            valid_vector = False
+                    if valid_vector:
+                        marker = tuple(normalized)
+                        if marker in seen_vectors:
+                            errors.append(f"[{profile_name}] 💥 {label}.states 不得有重複的 coil vector！")
+                        seen_vectors.add(marker)
+
+                if start_addr is not None and count is not None:
+                    for address in range(start_addr, start_addr + count):
+                        prior = used_addresses.get(address)
+                        if prior is not None:
+                            errors.append(
+                                f"[{profile_name}] 💥 coil_groups overlap：{label} 與 {prior} 共用 coil {address}！"
+                            )
+                        else:
+                            used_addresses[address] = label
+
         # 依序執行所有安檢
         _check_frontend("B1_INFO", rmap.get("B1_INFO"))
         _check_frontend("B2_SETTING", rmap.get("B2_SETTING"))
@@ -207,6 +399,9 @@ def validate_profile(profile_name: str, rmap) -> list[str]:
         _check_backend(rmap.get("sensors"))
         _check_settings(rmap.get("settings"))
         _check_read_commands(rmap.get("read_commands"))
+        # V1.7：必須排在 _check_read_commands 之後，command_by_id 才是完整的。
+        _check_sensor_command_refs(rmap.get("sensors"), rmap.get("read_commands"))
+        _check_coil_groups(rmap.get("coil_groups"))
 
         return errors
 

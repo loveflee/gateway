@@ -18,6 +18,15 @@
 #          僅新增日誌，不改變任何解析結果與例外行為。
 #   V2.6 : [Protocol] Deep CRC Radar 增加合法 Exception 候選；由 request count 自動
 #          推導 FC01/02/03/04 回覆資料長度，拒絕同 UID/FC 的錯 quantity 舊幀。
+#   V2.7 : [Protocol] 新增 FC15 Write Multiple Coils 與 profile coil_groups。
+#   V2.8 : [Safety] 正常 FC01 poll 亦重算 coil_groups，避免 FC05／外部狀態改變
+#          後把舊 group state 快取重播給 HA；單路 verify 則先標示未知；未命名
+#          vector 固定為 __UNMATCHED__。
+#   V2.9 : [Safety] FC15 group write 的 pending target 改為 verify 建立時一次性消費；
+#          成功、timeout、ACK 拒絕、decode 失敗與 retry 耗盡後均不可被後續
+#          build_verify_read() 重用舊 target。
+#          群組寫入只建立一筆 FC15，verify 共用完整 FC01 decoder；任何未命名
+#          狀態固定回 __UNMATCHED__，不得落入 BusMaster 的 None 成功相容分支。
 # =============================================================================
 
 import struct
@@ -27,6 +36,7 @@ import math
 logger = logging.getLogger(__name__)
 
 ADAPTER_NAME = "rtu"
+COIL_GROUP_UNMATCHED = "__UNMATCHED__"
 
 class DataDecodeError(Exception):
     pass
@@ -50,6 +60,11 @@ class Adapter:
         self.definitions = profile.get("definitions", {})
         self.sensors = profile.get("sensors", [])
         self.settings = profile.get("settings", {})
+        self.coil_groups = profile.get("coil_groups", {})
+        # BusMaster 每個 attempt 都同步呼叫 encode_write() 後立刻呼叫
+        # build_verify_read()。pending target 必須由後者一次性消費，絕不從
+        # 裝置狀態推測或做 read-modify-write。
+        self._pending_group_states = {}
 
         self._poll_cmds = self._prebuild_poll_cmds()
         self._poll_index = 0
@@ -236,6 +251,162 @@ class Adapter:
         base = struct.pack('>BBHHB', self.uid, 0x10, target_addr, register_count, len(register_bytes))
         return base + register_bytes + calc_crc16(base + register_bytes)
 
+    # =========================================================================
+    # FC15 / Profile coil_groups
+    # =========================================================================
+    @staticmethod
+    def _coerce_coil_bool(value) -> bool:
+        """Accept only the explicit coil tokens used by profile/HA."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            token = value.strip().upper()
+            if token == "ON":
+                return True
+            if token == "OFF":
+                return False
+        raise ValueError(f"coil value 必須是 bool、ON 或 OFF，收到 {value!r}")
+
+    @classmethod
+    def pack_coils_lsb_first(cls, values) -> bytes:
+        """Pack consecutive coils in Modbus FC15's LSB-first wire order."""
+        coils = [cls._coerce_coil_bool(value) for value in values]
+        if not coils:
+            raise ValueError("FC15 至少需要一個 coil")
+        if len(coils) > 2000:
+            raise ValueError(f"FC15 coil 數量超出 2000 上限: {len(coils)}")
+
+        packed = bytearray((len(coils) + 7) // 8)
+        for index, enabled in enumerate(coils):
+            if enabled:
+                packed[index // 8] |= 1 << (index % 8)
+        return bytes(packed)
+
+    @classmethod
+    def build_fc15_pdu(cls, start_addr: int, values) -> bytes:
+        """Build a transport-neutral FC15 PDU for RTU and MBAP adapters."""
+        try:
+            start_addr = int(start_addr)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"FC15 start_addr 無效: {e}")
+        coils = list(values)
+        packed = cls.pack_coils_lsb_first(coils)
+        quantity = len(coils)
+        if not 0 <= start_addr <= 0xFFFF or start_addr + quantity > 0x10000:
+            raise ValueError(f"FC15 位址範圍無效: start={start_addr}, quantity={quantity}")
+        return struct.pack('>BHHB', 0x0F, start_addr, quantity, len(packed)) + packed
+
+    def _find_coil_group(self, key: str):
+        if not isinstance(self.coil_groups, dict):
+            raise ValueError("coil_groups 必須是 dict")
+        group = self.coil_groups.get(key)
+        if group is None:
+            return None
+        if not isinstance(group, dict):
+            raise ValueError(f"coil_groups.{key} 必須是 dict")
+        return group
+
+    def _group_state_vector(self, key: str, group: dict, state_name: str) -> list[bool]:
+        states = group.get("states")
+        if not isinstance(states, dict) or state_name not in states:
+            raise ValueError(f"coil group '{key}' 不支援 state '{state_name}'")
+        try:
+            count = int(group["count"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"coil group '{key}' count 無效: {e}")
+        vector = states[state_name]
+        if not isinstance(vector, list) or len(vector) != count:
+            raise ValueError(f"coil group '{key}' state '{state_name}' vector 長度不符")
+        return [self._coerce_coil_bool(item) for item in vector]
+
+    def _prepare_coil_group_write(self, key: str, value) -> tuple[int, list[bool]]:
+        group = self._find_coil_group(key)
+        if group is None:
+            raise ValueError(f"未知的 coil group '{key}'")
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"coil group '{key}' 必須使用 profile 定義的命名 state")
+        try:
+            start_addr = int(group["start_addr"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"coil group '{key}' start_addr 無效: {e}")
+        vector = self._group_state_vector(key, group, value)
+        # Only commit the pending state after all validation succeeds.
+        self._pending_group_states[key] = value
+        return start_addr, vector
+
+    def _build_coil_group_verify_spec(self, key: str) -> tuple[dict, dict, str]:
+        group = self._find_coil_group(key)
+        if group is None:
+            raise ValueError(f"未知的 coil group '{key}'")
+        # A group target belongs to exactly one encode_write() -> verify attempt.
+        # BusMaster retries by calling encode_write() again before this method,
+        # so consuming it here cannot lose a retry target.  Conversely, pop()
+        # closes every terminal path outside the Adapter (ACK reject, timeout,
+        # decode error, mismatch exhaustion, or success): a later direct verify
+        # cannot resurrect a previous command's target.
+        state_name = self._pending_group_states.pop(key, None)
+        if state_name is None:
+            raise ValueError(f"coil group '{key}' 尚未建立 FC15 write，拒絕 verify")
+        # Re-validate the state here so a stale/bad pending value cannot turn into
+        # a permissive verify path.
+        self._group_state_vector(key, group, state_name)
+        verify_command_id = group.get("verify_command_id")
+        for command in self.profile.get("read_commands", []):
+            if isinstance(command, dict) and command.get("id") == verify_command_id:
+                return group, command, state_name
+        raise ValueError(f"coil group '{key}' verify_command_id 不存在: {verify_command_id!r}")
+
+    def _match_coil_group_state(self, group: dict, decoded: dict) -> str:
+        """Return only a named exact vector; every other outcome is fail-closed."""
+        try:
+            members = group.get("members")
+            states = group.get("states")
+            if not isinstance(members, list) or not isinstance(states, dict):
+                return COIL_GROUP_UNMATCHED
+            observed = tuple(self._coerce_coil_bool(decoded.get(member)) for member in members)
+            for state_name, vector in states.items():
+                normalized = tuple(self._coerce_coil_bool(item) for item in vector)
+                if normalized == observed:
+                    return state_name
+        except (TypeError, ValueError):
+            pass
+        return COIL_GROUP_UNMATCHED
+
+    def _append_polled_coil_group_states(self, command: dict, decoded: dict) -> None:
+        """Derive every group tied to this FC01 command from the fresh coil decode.
+
+        HA state is a merged cache.  A group value must therefore be included in
+        normal polls as well as write verify responses; otherwise a prior named
+        state can be republished after an FC05 or external coil change.  The
+        existing exact matcher deliberately returns ``__UNMATCHED__`` for every
+        non-profile vector, rather than retaining or guessing a previous state.
+        """
+        command_id = command.get("id") if isinstance(command, dict) else None
+        if not command_id or not isinstance(self.coil_groups, dict):
+            return
+
+        for group_key, group in self.coil_groups.items():
+            if not isinstance(group, dict):
+                continue
+            if group.get("verify_command_id") != command_id:
+                continue
+            decoded[group_key] = self._match_coil_group_state(group, decoded)
+
+    def _mark_partial_verify_groups_unmatched(self, key: str, decoded: dict) -> None:
+        """Fail closed when a legacy single-coil verify cannot prove a group.
+
+        FC05 verify intentionally reads only the written coil to preserve its
+        long-standing request/response contract.  It cannot establish the other
+        members' physical states, so retaining a previously named group state
+        would be false.  Publish the explicit unknown sentinel until the next
+        full FC01 poll computes the exact vector.
+        """
+        if not isinstance(self.coil_groups, dict):
+            return
+        for group_key, group in self.coil_groups.items():
+            if isinstance(group, dict) and key in group.get("members", []):
+                decoded[group_key] = COIL_GROUP_UNMATCHED
+
     def build_poll_read(self) -> tuple[bytes, dict]:
         if not self._poll_cmds:
             raise RuntimeError("設備未定義 read_commands")
@@ -245,6 +416,30 @@ class Adapter:
         return cmd['req'], {"type": "poll", "cmd": cmd}
 
     def build_verify_read(self, key: str) -> tuple[bytes, dict]:
+        group = self._find_coil_group(key)
+        if group is not None:
+            group, command, state_name = self._build_coil_group_verify_spec(key)
+            try:
+                read_fc = int(command["fc"])
+                start_addr = int(command["start_addr"])
+                count = int(command["count"])
+            except (KeyError, TypeError, ValueError) as e:
+                raise ValueError(f"coil group '{key}' verify command 無效: {e}")
+            if read_fc != 0x01:
+                raise ValueError(f"coil group '{key}' verify 必須使用 FC01，收到 FC{read_fc}")
+            base = struct.pack('>BBHH', self.uid, read_fc, start_addr, count)
+            return base + calc_crc16(base), {
+                "type": "verify",
+                "key": key,
+                "read_fc": read_fc,
+                "strict_verify": True,
+                "expected_data_bytes": (count + 7) // 8,
+                "expected_count": count,
+                "coil_group": group,
+                "group_state": state_name,
+                "verify_command": command,
+            }
+
         try:
             setting, target_addr = self._find_setting(key)
         except ValueError:
@@ -278,6 +473,13 @@ class Adapter:
         return req, context
 
     def encode_write(self, key: str, value) -> bytes:
+        group = self._find_coil_group(key)
+        if group is not None:
+            target_addr, vector = self._prepare_coil_group_write(key, value)
+            pdu = self.build_fc15_pdu(target_addr, vector)
+            base = bytes([self.uid]) + pdu
+            return base + calc_crc16(base)
+
         setting, target_addr = self._find_setting(key)
 
         # ✅ [Fix V2.4R] 強制數值轉型
@@ -375,10 +577,23 @@ class Adapter:
                             break
 
             elif read_fc in (0x01, 0x02):
-                if len(raw_data) >= 6:
+                coil_group = context.get("coil_group")
+                if coil_group is not None:
+                    verify_command = context.get("verify_command")
+                    if not isinstance(verify_command, dict):
+                        raise DataDecodeError("coil group verify 缺少 read command context")
+                    # Reuse the existing poll decoder.  This updates every normal
+                    # switch key from the one FC01 response; no second bit decoder.
+                    decoded_switches = self._extract_data(
+                        raw_data, {"type": "poll", "cmd": verify_command}
+                    )
+                    result.update(decoded_switches)
+                    result[key] = self._match_coil_group_state(coil_group, decoded_switches)
+                elif len(raw_data) >= 6:
                     coil_byte = raw_data[3]
                     coil_val  = bool(coil_byte & 0x01)
                     result[key] = "ON" if coil_val else "OFF"
+                    self._mark_partial_verify_groups_unmatched(key, result)
 
         elif ctx_type == "poll":
             cmd = context["cmd"]
@@ -450,6 +665,11 @@ class Adapter:
                     f"(offset越界 {skipped_oob} / 未能解包 {skipped_null} / 解析失敗 {skipped_err})"
                     f"，實際封包 {len(raw_data)}B"
                 )
+
+            # FC01 poll is the authoritative physical state.  Recompute groups
+            # only after the existing bit decoder has populated every member.
+            # Do not reuse a pending write value or HA cache value here.
+            self._append_polled_coil_group_states(cmd, result)
 
         else:
             raise DataDecodeError(f"無效的 context type: {ctx_type}")
