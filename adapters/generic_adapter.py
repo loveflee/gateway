@@ -1,5 +1,5 @@
 # =============================================================================
-# generic_adapter.py - V2.6 工業封存版
+# generic_adapter.py - V2.9 fc 15 實作補足版
 # 核心職責：標準 Modbus RTU 解析器 (TCP/Serial 共用卡車頭)
 # 修復歷程：
 #   V2.3 : 將 decode() 重構，拆分出純函數 _extract_data()。
