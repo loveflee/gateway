@@ -17,6 +17,7 @@
 | `src/adapter_catalog.py` | Adapter 探索的共用實作。`load_adapters()` 供 main.py runtime 使用（保留原啟動日誌語意），`discover_adapter_catalog()` 供 WebUI 唯讀查詢；**掃描過程不建立 Gateway、Driver、MQTT 或 WebUI**。 |
 | `src/` | 主動／監聽 Driver、BusMaster、MQTT、HA Discovery、Web UI、profile validator 等 production 程式。 |
 | `adapters/` | 可載入的設備協定 Adapter；容器內掛載為 `/app/src/adapters`。 |
+| `adapters/adapter_helper.py` | `StandardParser`：sensor 解析的共用實作（offset／length／datatype／scale／value map 的型別守衛與單點故障隔離）。**檔名不以 `_adapter.py` 結尾，故不會被 loader 當成 Adapter**；由 `generic_adapter` 與 `ampinvt_adapter` 匯入。 |
 | `profile/config.yaml` | runtime 設定：driver、MQTT、bus 與裝置的 adapter／profile／mode。 |
 | `profile/*_map.yaml` 等 | 裝置地圖：讀取命令、sensors、settings 與 HA 定義。它們不是 `config.yaml` 的替代品。 |
 | `report/` | 審查、測試與決策紀錄；用來理解背景，不可凌駕實際 code。 |
@@ -60,11 +61,21 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 
 - 主動模式 Adapter 必須實作 `encode_write(key, value)`、`build_verify_read(key)`、`build_poll_read()`、`decode(raw_data, context)`。
 - 監聽模式另依 `feed()` 處理串流。Adapter 內應保持無阻塞、無網路 I/O 的解析／編碼邏輯，避免阻塞監聽解碼執行緒。
-- 現有 Adapter 包含 Generic Modbus（`rtu`）、Modbus TCP（`tcp`）、JKBMS（`jkbms`）、ST inverter（`st_inverter`）與 Solis 語意層（`solis_inverter`）；新增或修改前先確認實際 `ADAPTER_NAME`、mode 與 profile 的組合。
+- 現有 Adapter 的 `ADAPTER_NAME`：`rtu`（`generic_adapter.py`）、`tcp`（`modbus_tcp_adapter.py`）、`jkbms`、`old_jkbms`、`st_inverter`、`solis_inverter`、`ampinvt`。新增或修改前先確認實際 `ADAPTER_NAME`、mode 與 profile 的組合 —— **檔名與註冊名不一致是常態**（例如 `st_inverter_adapter.py` 的註解寫 `generic > rtu` 但實際註冊為 `st_inverter`）。
+- `old_jkbms_adapter.py` 檔名以 `_adapter.py` 結尾,**會被自動載入**；它以 `old_jkbms` 註冊,與 `jkbms` 不衝突。要停用某個舊 Adapter,改副檔名（如 `bak.` 前綴）而不是留在原地。
 
 `adapters/solis_inverter_adapter.py` 是**疊加式 Adapter 的範本**：它繼承 `GenericAdapter`，只覆寫 `decode()`，在 `super().decode()` 之後、且僅當 context 為 poll 且 command id 相符時，替 43110 補上唯讀中文語意欄位。它**不實作** Modbus、CRC、transport、ACK、write、reconnect 或 scheduling。要為特定廠商加語意時沿用此模式：先讓 GenericAdapter 完成標準解碼，再疊加，不要複製一份協定實作。
 
-目前 working tree 的 `adapters/generic_adapter.py` 可證實：讀取支援 FC01、FC02、FC03、FC04；寫入支援 FC05、FC06、FC16。FC16 的既有單 register 路徑保持 quantity=1；當 setting 能以 `link_sensor` 優先、同名 sensor 次之，明確解析到 4-byte 的 `uint32`、`int32` 或 `float32` metadata 時，才走 quantity=2 的 32-bit 寫入與嚴格 verify read。32-bit write 的現有 order 為 `big`、`little`、`swap`／`word_swap`、`byte_swap`；沒有可明確推導的 metadata 時必須維持 legacy 16-bit 行為，不可猜測。
+目前 working tree 的 `adapters/generic_adapter.py` 可證實：讀取支援 FC01、FC02、FC03、FC04；寫入支援 FC05、FC06、**FC15**、FC16。
+
+- **FC16**：既有單 register 路徑保持 quantity=1；當 setting 能以 `link_sensor` 優先、同名 sensor 次之，明確解析到 4-byte 的 `uint32`、`int32` 或 `float32` metadata 時，才走 quantity=2 的 32-bit 寫入與嚴格 verify read。32-bit write 的現有 order 為 `big`、`little`、`swap`／`word_swap`、`byte_swap`；沒有可明確推導的 metadata 時必須維持 legacy 16-bit 行為，不可猜測。
+- **FC15**：由 profile 的 `coil_groups` 區塊驅動（見 §5）。`pack_coils_lsb_first()` 與 `build_fc15_pdu()` 是 **transport-neutral 的 PDU 產生器**，RTU 與 MBAP adapter 共用同一份實作；不要在子類重造一份 coil packing。群組寫入只建立一筆 FC15，verify 共用完整的 FC01 decoder。
+- **群組狀態的生命週期是回歸敏感區**：`_pending_group_states` 於 verify 建立時**一次性消費**；正常 FC01 poll 會**重算** group state，避免 FC05 或外部主站改變 coil 後把舊快取重播給 HA；未命名組合以 `COIL_GROUP_UNMATCHED` 標示，不得猜測成任一已知 state。修改此處前先讀 report 043–047 的施工與驗收紀錄。
+
+寫入 ACK 的驗證責任依 transport 分流,兩條路都不可再落回盲收：
+
+- **RTU / RTU-over-TCP**：`src/driver.py` 驗 request 端 CRC 後，再驗 ACK 的長度、UID、FC、CRC 與 `resp[2:6]` echo。
+- **原生 Modbus TCP（MBAP）**：`src/modbus_tcp_driver.py` 自行驗 transaction id、protocol id、length、UID、FC 與 echo（MBAP 無 CRC，故不能沿用父類的 RTU guard）。
 
 修改 Adapter 時：
 
@@ -76,7 +87,22 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 
 - `profile/config.yaml` 是 runtime config；裝置的 `profile:` 值由 Gateway 在 `/app/profile` 以 `<name>.yaml` 載入（找不到 YAML 才嘗試同名 Python module）。地圖檔不是可任意交換的範例資料。
 - **雙向量必須宣告為有號型別。** 現行 Solis 地圖的既定慣例是：可正可負的量（`active_power`／`meter_active_power`／`battery_power` 用 `int32`，`battery_current`／`inverter_temp`／`backup_load_power` 用 `int16`），只增不減的量才用 `uint16`。把有號暫存器誤宣告為 `uint16` 的症狀是 HA 出現 `6xxxx` 這種物理上不可能的數值（`0xFFxx` 被當正數）。新增功率／電流／溫度點位時先確認雙向性，不要預設 unsigned。
-- 同一組地圖可能存在多份變體（例如 `solis_inverter_map.yaml` 與 `solis_inverter_map2.yaml`、`6k2*.yaml`）。修正某個 sensor 的 datatype 時，要確認**目前 `config.yaml` 實際掛載的是哪一份**；只改其中一份會讓其他變體保留舊錯誤，日後切換 profile 即復發。
+- 同一組地圖可能存在多份變體（例如 `solis_inverter_map.yaml` 與 `solis_inverter_map2.yaml`、`6k2*.yaml`、`relay_8ch_map2.yaml`）。修正某個 sensor 的 datatype 時，要確認**目前 `config.yaml` 實際掛載的是哪一份**；只改其中一份會讓其他變體保留舊錯誤，日後切換 profile 即復發。
+- **`coil_groups` 是 FC15 專用的 profile 區塊**，也是目前唯一在既有 `read_commands`／`sensors`／`settings` 之外新增的 schema：
+
+  ```yaml
+  coil_groups:
+    group_01:
+      start_addr: 0            # FC15 起始 coil 位址
+      count: 2                 # 必須等於 members 長度
+      members: [switch_0, switch_1]   # 對應 settings 的 key，順序即 coil 順序
+      verify_command_id: read_coils   # 回讀所用的 FC01 command
+      states:                  # 具名狀態 → 各 member 的 ON/OFF 序列
+        all_off: [OFF, OFF]
+        all_on:  [ON, ON]
+  ```
+
+  `map_validator.py` 已涵蓋此區塊：dict 結構、group key 非空字串、`start_addr` 合法、`count` 為 1–2000 的非 bool 整數、`start_addr + count ≤ 65536`、`members` 為非空 list、且 `count == len(members)`。它同時拒絕 `settings` 內重複的 key（重複會使 `coil_groups` 無法安全對應位址）並檢查 `sensors` 的 `command_id` 是否存在。**通過 validator 不等於位址、實機 coil 對應或寫入安全已獲證明。**
 - 地圖靜態驗證使用現有 validator。容器運行時可用：
 
   ```bash
@@ -125,7 +151,7 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 
 ## 9. 已知邊界（提醒，不在未授權任務中順手修）
 
-- `map_validator.py` 的能力邊界後續可能需要與 GenericAdapter 的 codec／FC 能力同步收緊。
-- `dcba` 的 read/write 歷史語意尚有不對稱，須另案以實際 profile 與封包驗證。
-- FC15、FC22、FC23 與 64-bit write 不是目前已授權的必要能力。
+- `map_validator.py` 已針對 `coil_groups`、重複 settings key 與 sensor `command_id` 參照收緊；其餘欄位（read FC 白名單與數量上限、write FC 白名單、`verify_count`、datatype／word_order 值域）仍未全面對齊 GenericAdapter 的能力,後續可另案處理。
+- `dcba` 的 read/write 歷史語意尚有不對稱：read 對 4-byte 不處理 `dcba`（落到 `big`），write 則明確拒絕。現行 profile 無此組合，但未經實機驗證前不可自行延伸。
+- FC22、FC23 與 64-bit write 仍不是已授權的必要能力（FC15 已於 report 037–047 完成施工與驗收）。
 - PyModbus 的定位是標準 reference／isolated test oracle；不得加入 `requirements.txt` 或作為 production runtime dependency，除非另有明確設計與授權。
