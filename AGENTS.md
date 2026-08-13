@@ -69,6 +69,8 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 目前 working tree 的 `adapters/generic_adapter.py` 可證實：讀取支援 FC01、FC02、FC03、FC04；寫入支援 FC05、FC06、**FC15**、FC16。
 
 - **FC16**：既有單 register 路徑保持 quantity=1；當 setting 能以 `link_sensor` 優先、同名 sensor 次之，明確解析到 4-byte 的 `uint32`、`int32` 或 `float32` metadata 時，才走 quantity=2 的 32-bit 寫入與嚴格 verify read。32-bit write 的現有 order 為 `big`、`little`、`swap`／`word_swap`、`byte_swap`；沒有可明確推導的 metadata 時必須維持 legacy 16-bit 行為，不可猜測。
+  - **quantity=2 已有實機閉環證據,不只是單元測試。** 見 report 048–050：驗證設備是 HY-IO8800S（`192.168.88.190:502`、UID3、原生 Modbus TCP／MBAP，**不是 Solis**），標的為 Rule1 Param1（PLC `40133` → protocol `0x0084`、`uint32` big-endian）。走完整的 `MQTT → FC16 → ACK → FC03 quantity=2 → MQTT state`，寫入 `0x12345678` 與 `100000` 皆完整回讀四個 byte，未發生只比對前半個 register 的退化，事後寫回 baseline `0` 並確認 Rule1、8 路 relay、兩個 group 全部還原。該輪 **production code 零修改** —— 既有實作原本就會為明確 4-byte metadata 建立 quantity=2。
+  - 這條驗證是在 FC15（report 037–047）**之後**才補做的,且刻意換一台設備:Solis 沒有可安全寫入的 32-bit register（report 028／029 卡在此），因此 32-bit 路徑的端到端證據只在 HY-IO8800S 上取得。動 FC16 前先讀 050,不要以為它只有 mock 測試護著。
 - **FC15**：由 profile 的 `coil_groups` 區塊驅動（見 §5）。`pack_coils_lsb_first()` 與 `build_fc15_pdu()` 是 **transport-neutral 的 PDU 產生器**，RTU 與 MBAP adapter 共用同一份實作；不要在子類重造一份 coil packing。群組寫入只建立一筆 FC15，verify 共用完整的 FC01 decoder。
 - **群組狀態的生命週期是回歸敏感區**：`_pending_group_states` 於 verify 建立時**一次性消費**；正常 FC01 poll 會**重算** group state，避免 FC05 或外部主站改變 coil 後把舊快取重播給 HA；未命名組合以 `COIL_GROUP_UNMATCHED` 標示，不得猜測成任一已知 state。修改此處前先讀 report 043–047 的施工與驗收紀錄。
 
@@ -88,6 +90,7 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 - `profile/config.yaml` 是 runtime config；裝置的 `profile:` 值由 Gateway 在 `/app/profile` 以 `<name>.yaml` 載入（找不到 YAML 才嘗試同名 Python module）。地圖檔不是可任意交換的範例資料。
 - **雙向量必須宣告為有號型別。** 現行 Solis 地圖的既定慣例是：可正可負的量（`active_power`／`meter_active_power`／`battery_power` 用 `int32`，`battery_current`／`inverter_temp`／`backup_load_power` 用 `int16`），只增不減的量才用 `uint16`。把有號暫存器誤宣告為 `uint16` 的症狀是 HA 出現 `6xxxx` 這種物理上不可能的數值（`0xFFxx` 被當正數）。新增功率／電流／溫度點位時先確認雙向性，不要預設 unsigned。
 - 同一組地圖可能存在多份變體（例如 `solis_inverter_map.yaml` 與 `solis_inverter_map2.yaml`、`6k2*.yaml`、`relay_8ch_map2.yaml`）。修正某個 sensor 的 datatype 時，要確認**目前 `config.yaml` 實際掛載的是哪一份**；只改其中一份會讓其他變體保留舊錯誤，日後切換 profile 即復發。
+- **`profile/` 內存在已入庫但未啟用的地圖。** `relay_8ch_full_map.yaml` 是 HY-IO8800S 依 report 051 盤點建立的完整點位版（176 個 sensor、96 個 MQTT state key），只收錄手冊列出且經實機唯讀回讀確認的點位。它**沒有被任何 `config.yaml` 引用**，驗證機 UID3 目前跑的仍是 `relay_8ch_map2`。注意兩件事：(1) 放在 `profile/` 就會被 `web_admin._discover_profiles()` 掃到而出現在 WebUI 下拉選單，屬「可選但未選」；(2) 它**不新增任何寫入目標** —— `settings` 只有原本 8 顆 FC05 relay，`B2_SETTING` 只有兩個 FC15 group select，手冊標為 RW 的 holding register（裝置位址、broadcast mode、輸出保持、pulse 邊緣／防抖、心跳、Rule 參數）一律唯讀。要開放其中任何一個寫入,必須另過一輪寫入安全審查:configured device address 會改變通訊目標、output state hold 會改變斷電後的 DO 行為,重啟與恢復出廠寄存器則永不映射到 HA。
 - **`coil_groups` 是 FC15 專用的 profile 區塊**，也是目前唯一在既有 `read_commands`／`sensors`／`settings` 之外新增的 schema：
 
   ```yaml
@@ -153,5 +156,7 @@ Adapter 探索實作在 `src/adapter_catalog.py`；`src/main.py` 以 `from adapt
 
 - `map_validator.py` 已針對 `coil_groups`、重複 settings key 與 sensor `command_id` 參照收緊；其餘欄位（read FC 白名單與數量上限、write FC 白名單、`verify_count`、datatype／word_order 值域）仍未全面對齊 GenericAdapter 的能力,後續可另案處理。
 - `dcba` 的 read/write 歷史語意尚有不對稱：read 對 4-byte 不處理 `dcba`（落到 `big`），write 則明確拒絕。現行 profile 無此組合，但未經實機驗證前不可自行延伸。
-- FC22、FC23 與 64-bit write 仍不是已授權的必要能力（FC15 已於 report 037–047 完成施工與驗收）。
+- FC22、FC23 與 64-bit write 仍不是已授權的必要能力（FC15 已於 report 037–047 完成施工與驗收，FC16 quantity=2 已於 report 048–050 取得實機閉環證據）。
+- **驗證機在遠端,不是這台 VM。** HY-IO8800S（UID3）與其 relay／IO 點位的實機證據來自遠端設備,本目錄只留下報告、地圖與測試腳本。這代表:任何宣稱「已實機驗證」的結論,**證據鏈只存在於文件裡**,本機無法重跑。因此 report 與 AGENTS/README 的對齊不是文書工作,是唯一可稽核的來源 —— 發現文件與程式碼不一致時,優先修文件而不是憑印象改程式碼。
+- `local_serial_driver.py`（`type: usb`）與監聽軌（`mode: listen`）本機無對應硬體。report 052 的系統級總驗收已在「未涵蓋範圍」明確排除這兩條軌,它們只做過靜態閱讀,**不得宣稱已驗證**。
 - PyModbus 的定位是標準 reference／isolated test oracle；不得加入 `requirements.txt` 或作為 production runtime dependency，除非另有明確設計與授權。

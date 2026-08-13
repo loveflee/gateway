@@ -1,0 +1,294 @@
+# HY-IO8800S 完整點位地圖（唯讀擴充版）— 依 report/051 盤點結果建立
+#
+# 狀態：已納入版控，**尚未啟用**。任何 config.yaml 的 devices 條目都沒有指向
+#       本檔；驗證機 UID3 目前跑的仍是 relay_8ch_map2。放進 profile/ 之後會
+#       出現在 WebUI 的 profile 下拉選單中（web_admin._discover_profiles()
+#       掃描 profile/*.yaml），屬「可選但未選」，切換與否是現場決定。
+#
+# 寫入面：本檔不新增任何寫入目標。settings 只有原本 8 顆 FC05 relay，
+#         B2_SETTING 只有 group_01／group_234 兩個 FC15 select。手冊標示為
+#         RW 的 holding register（裝置位址、broadcast mode、輸出保持、
+#         pulse 邊緣／防抖、心跳、Rule 參數等）在本檔一律只讀不寫，
+#         要開放寫入必須另過一輪寫入安全審查 —— 其中 configured device
+#         address 與 output state hold 會改變通訊目標與斷電後 DO 行為，
+#         重啟／恢復出廠寄存器則永不映射到 HA。
+#
+# 證據等級：僅收錄 report/051 判定為 BOTH CONFIRMED 的點位（原廠手冊列出
+#           且經 UID3 實機 FC01／FC02／FC03 唯讀回讀、由 production Adapter
+#           成功解碼）。位址換算 protocol = PLC − 40001／− 10001／− 00001。
+#
+# 相關報告：051（點位盤點）、050（FC16 quantity=2 實機閉環，同一台 UID3）。
+
+definitions:
+  value_maps:
+    broadcast_mode: {0: "off", 1: "receive_and_respond", 2: "receive_no_response"}
+    output_state_hold: {0: "no_hold", 1: "hold_after_soft_restart", 2: "hold_after_soft_restart_and_power_loss"}
+    pulse_count_edge: {0: "falling_edge", 1: "rising_edge"}
+    enabled: {0: "off", 1: "on"}
+    serial_parity: {0: "none", 1: "odd", 2: "even"}
+    rule_mode:
+      0: "disabled"
+      1: "di_follow"
+      2: "pulse_output"
+      3: "delay_control"
+      4: "timed_change"
+      5: "cycle_change"
+      6: "button"
+      7: "schedule_once"
+      8: "schedule_cycle"
+      9: "daily_schedule"
+      10: "ai_voltage_high"
+      11: "ai_voltage_low"
+      12: "ai_current_high"
+      13: "ai_current_low"
+
+read_commands:
+  - {id: "read_coils", fc: 1, start_addr: 0, count: 8, response_len: 6}
+  - {id: "read_discrete_inputs", fc: 2, start_addr: 0, count: 8, response_len: 6}
+  - {id: "read_identity", fc: 3, start_addr: 0, count: 42, response_len: 89}
+  - {id: "read_parameters", fc: 3, start_addr: 42, count: 51, response_len: 107}
+  - {id: "read_rules_1_to_8", fc: 3, start_addr: 128, count: 64, response_len: 133}
+  - {id: "read_di_pulse_counts", fc: 3, start_addr: 1280, count: 16, response_len: 37}
+
+sensors:
+  - key: "relay_status_byte"
+    command_id: "read_coils"
+    offset: 3
+    length: 1
+    bits:
+      - {bit: 0, id: "switch_0", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "switch_1", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "switch_2", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "switch_3", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "switch_4", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "switch_5", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "switch_6", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "switch_7", ha: {payload_on: "ON", payload_off: "OFF"}}
+  - key: "di_status_byte"
+    command_id: "read_discrete_inputs"
+    offset: 3
+    length: 1
+    bits:
+      - {bit: 0, id: "di_0", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 1, id: "di_1", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 2, id: "di_2", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 3, id: "di_3", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 4, id: "di_4", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 5, id: "di_5", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 6, id: "di_6", ha: {payload_on: "ON", payload_off: "OFF"}}
+      - {bit: 7, id: "di_7", ha: {payload_on: "ON", payload_off: "OFF"}}
+
+  - {key: "device_model", command_id: "read_identity", offset: 3, length: 32, datatype: "string"}
+  - {key: "firmware_version", command_id: "read_identity", offset: 35, length: 32, datatype: "string"}
+  - {key: "serial_number", command_id: "read_identity", offset: 67, length: 20, datatype: "string"}
+
+  - {key: "running_slave_address", command_id: "read_parameters", offset: 3, length: 2, datatype: "uint16"}
+  - {key: "dip_switch_offset", command_id: "read_parameters", offset: 5, length: 2, datatype: "uint16"}
+  - {key: "uptime_seconds", command_id: "read_parameters", offset: 7, length: 4, datatype: "uint32", unit: "s"}
+  - {key: "configured_device_name", command_id: "read_parameters", offset: 11, length: 32, datatype: "string"}
+  - {key: "configured_device_address", command_id: "read_parameters", offset: 43, length: 2, datatype: "uint16"}
+  - {key: "broadcast_mode", command_id: "read_parameters", offset: 45, length: 2, datatype: "uint16", map_profile: "broadcast_mode"}
+  - {key: "output_state_hold", command_id: "read_parameters", offset: 47, length: 2, datatype: "uint16", map_profile: "output_state_hold"}
+  - {key: "pulse_count_edge", command_id: "read_parameters", offset: 49, length: 2, datatype: "uint16", map_profile: "pulse_count_edge"}
+  - {key: "pulse_debounce_ms", command_id: "read_parameters", offset: 51, length: 2, datatype: "uint16", unit: "ms"}
+  - {key: "boot_info_enabled", command_id: "read_parameters", offset: 53, length: 2, datatype: "uint16", map_profile: "enabled"}
+  - {key: "boot_info_content", command_id: "read_parameters", offset: 55, length: 16, datatype: "string"}
+  - {key: "serial_heartbeat_seconds", command_id: "read_parameters", offset: 71, length: 2, datatype: "uint16", unit: "s"}
+  - {key: "serial_heartbeat_content", command_id: "read_parameters", offset: 73, length: 16, datatype: "string"}
+  - {key: "rtc_unix_seconds", command_id: "read_parameters", offset: 89, length: 4, datatype: "uint32", unit: "s"}
+  - {key: "serial_baud_rate", command_id: "read_parameters", offset: 93, length: 4, datatype: "uint32", unit: "baud"}
+  - {key: "serial_data_bits", command_id: "read_parameters", offset: 97, length: 2, datatype: "uint16"}
+  - {key: "serial_stop_bits", command_id: "read_parameters", offset: 99, length: 2, datatype: "uint16"}
+  - {key: "serial_parity", command_id: "read_parameters", offset: 101, length: 2, datatype: "uint16", map_profile: "serial_parity"}
+  - {key: "serial_packet_time_ms", command_id: "read_parameters", offset: 103, length: 2, datatype: "uint16", unit: "ms"}
+
+  - {key: "rule_1_mode", command_id: "read_rules_1_to_8", offset: 3, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_1_action", command_id: "read_rules_1_to_8", offset: 5, length: 2, datatype: "uint16"}
+  - {key: "rule_1_output", command_id: "read_rules_1_to_8", offset: 7, length: 2, datatype: "uint16"}
+  - {key: "rule_1_input", command_id: "read_rules_1_to_8", offset: 9, length: 2, datatype: "uint16"}
+  - {key: "rule_1_param1", command_id: "read_rules_1_to_8", offset: 11, length: 4, datatype: "uint32"}
+  - {key: "rule_1_param2", command_id: "read_rules_1_to_8", offset: 15, length: 4, datatype: "uint32"}
+  - {key: "rule_2_mode", command_id: "read_rules_1_to_8", offset: 19, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_2_action", command_id: "read_rules_1_to_8", offset: 21, length: 2, datatype: "uint16"}
+  - {key: "rule_2_output", command_id: "read_rules_1_to_8", offset: 23, length: 2, datatype: "uint16"}
+  - {key: "rule_2_input", command_id: "read_rules_1_to_8", offset: 25, length: 2, datatype: "uint16"}
+  - {key: "rule_2_param1", command_id: "read_rules_1_to_8", offset: 27, length: 4, datatype: "uint32"}
+  - {key: "rule_2_param2", command_id: "read_rules_1_to_8", offset: 31, length: 4, datatype: "uint32"}
+  - {key: "rule_3_mode", command_id: "read_rules_1_to_8", offset: 35, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_3_action", command_id: "read_rules_1_to_8", offset: 37, length: 2, datatype: "uint16"}
+  - {key: "rule_3_output", command_id: "read_rules_1_to_8", offset: 39, length: 2, datatype: "uint16"}
+  - {key: "rule_3_input", command_id: "read_rules_1_to_8", offset: 41, length: 2, datatype: "uint16"}
+  - {key: "rule_3_param1", command_id: "read_rules_1_to_8", offset: 43, length: 4, datatype: "uint32"}
+  - {key: "rule_3_param2", command_id: "read_rules_1_to_8", offset: 47, length: 4, datatype: "uint32"}
+  - {key: "rule_4_mode", command_id: "read_rules_1_to_8", offset: 51, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_4_action", command_id: "read_rules_1_to_8", offset: 53, length: 2, datatype: "uint16"}
+  - {key: "rule_4_output", command_id: "read_rules_1_to_8", offset: 55, length: 2, datatype: "uint16"}
+  - {key: "rule_4_input", command_id: "read_rules_1_to_8", offset: 57, length: 2, datatype: "uint16"}
+  - {key: "rule_4_param1", command_id: "read_rules_1_to_8", offset: 59, length: 4, datatype: "uint32"}
+  - {key: "rule_4_param2", command_id: "read_rules_1_to_8", offset: 63, length: 4, datatype: "uint32"}
+  - {key: "rule_5_mode", command_id: "read_rules_1_to_8", offset: 67, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_5_action", command_id: "read_rules_1_to_8", offset: 69, length: 2, datatype: "uint16"}
+  - {key: "rule_5_output", command_id: "read_rules_1_to_8", offset: 71, length: 2, datatype: "uint16"}
+  - {key: "rule_5_input", command_id: "read_rules_1_to_8", offset: 73, length: 2, datatype: "uint16"}
+  - {key: "rule_5_param1", command_id: "read_rules_1_to_8", offset: 75, length: 4, datatype: "uint32"}
+  - {key: "rule_5_param2", command_id: "read_rules_1_to_8", offset: 79, length: 4, datatype: "uint32"}
+  - {key: "rule_6_mode", command_id: "read_rules_1_to_8", offset: 83, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_6_action", command_id: "read_rules_1_to_8", offset: 85, length: 2, datatype: "uint16"}
+  - {key: "rule_6_output", command_id: "read_rules_1_to_8", offset: 87, length: 2, datatype: "uint16"}
+  - {key: "rule_6_input", command_id: "read_rules_1_to_8", offset: 89, length: 2, datatype: "uint16"}
+  - {key: "rule_6_param1", command_id: "read_rules_1_to_8", offset: 91, length: 4, datatype: "uint32"}
+  - {key: "rule_6_param2", command_id: "read_rules_1_to_8", offset: 95, length: 4, datatype: "uint32"}
+  - {key: "rule_7_mode", command_id: "read_rules_1_to_8", offset: 99, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_7_action", command_id: "read_rules_1_to_8", offset: 101, length: 2, datatype: "uint16"}
+  - {key: "rule_7_output", command_id: "read_rules_1_to_8", offset: 103, length: 2, datatype: "uint16"}
+  - {key: "rule_7_input", command_id: "read_rules_1_to_8", offset: 105, length: 2, datatype: "uint16"}
+  - {key: "rule_7_param1", command_id: "read_rules_1_to_8", offset: 107, length: 4, datatype: "uint32"}
+  - {key: "rule_7_param2", command_id: "read_rules_1_to_8", offset: 111, length: 4, datatype: "uint32"}
+  - {key: "rule_8_mode", command_id: "read_rules_1_to_8", offset: 115, length: 2, datatype: "uint16", map_profile: "rule_mode"}
+  - {key: "rule_8_action", command_id: "read_rules_1_to_8", offset: 117, length: 2, datatype: "uint16"}
+  - {key: "rule_8_output", command_id: "read_rules_1_to_8", offset: 119, length: 2, datatype: "uint16"}
+  - {key: "rule_8_input", command_id: "read_rules_1_to_8", offset: 121, length: 2, datatype: "uint16"}
+  - {key: "rule_8_param1", command_id: "read_rules_1_to_8", offset: 123, length: 4, datatype: "uint32"}
+  - {key: "rule_8_param2", command_id: "read_rules_1_to_8", offset: 127, length: 4, datatype: "uint32"}
+
+  - {key: "di_1_pulse_count", command_id: "read_di_pulse_counts", offset: 3, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_2_pulse_count", command_id: "read_di_pulse_counts", offset: 7, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_3_pulse_count", command_id: "read_di_pulse_counts", offset: 11, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_4_pulse_count", command_id: "read_di_pulse_counts", offset: 15, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_5_pulse_count", command_id: "read_di_pulse_counts", offset: 19, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_6_pulse_count", command_id: "read_di_pulse_counts", offset: 23, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_7_pulse_count", command_id: "read_di_pulse_counts", offset: 27, length: 4, datatype: "uint32", unit: "pulses"}
+  - {key: "di_8_pulse_count", command_id: "read_di_pulse_counts", offset: 31, length: 4, datatype: "uint32", unit: "pulses"}
+
+# Existing individual FC05 controls; no FC06/FC16 holding-register setting is
+# enabled in this draft.
+settings:
+  0x0000: {key: "switch_0", write_fc: 5}
+  0x0001: {key: "switch_1", write_fc: 5}
+  0x0002: {key: "switch_2", write_fc: 5}
+  0x0003: {key: "switch_3", write_fc: 5}
+  0x0004: {key: "switch_4", write_fc: 5}
+  0x0005: {key: "switch_5", write_fc: 5}
+  0x0006: {key: "switch_6", write_fc: 5}
+  0x0007: {key: "switch_7", write_fc: 5}
+
+coil_groups:
+  group_01:
+    start_addr: 0
+    count: 2
+    members: [switch_0, switch_1]
+    verify_command_id: read_coils
+    states: {all_off: [OFF, OFF], all_on: [ON, ON]}
+  group_234:
+    start_addr: 2
+    count: 3
+    members: [switch_2, switch_3, switch_4]
+    verify_command_id: read_coils
+    states: {all_off: [OFF, OFF, OFF], pattern_101: [ON, OFF, ON]}
+
+# Original eight switches and two FC15 selects are structurally unchanged.
+B1_INFO:
+  - {key: "switch_0", name: "繼電器 CH1", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_1", name: "繼電器 CH2", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_2", name: "繼電器 CH3", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_3", name: "繼電器 CH4", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_4", name: "繼電器 CH5", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_5", name: "繼電器 CH6", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_6", name: "繼電器 CH7", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "switch_7", name: "繼電器 CH8", ha: {type: "switch", icon: "mdi:toggle-switch", payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF"}}
+  - {key: "di_0", name: "DI 1", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_1", name: "DI 2", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_2", name: "DI 3", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_3", name: "DI 4", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_4", name: "DI 5", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_5", name: "DI 6", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_6", name: "DI 7", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "di_7", name: "DI 8", ha: {type: "binary_sensor", payload_on: "ON", payload_off: "OFF"}}
+  - {key: "device_model", name: "裝置型號", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "firmware_version", name: "韌體版本", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_number", name: "裝置序號", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "running_slave_address", name: "運行從站位址", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "dip_switch_offset", name: "DIP 位址偏移", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "uptime_seconds", name: "運行時間", unit: "s", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "configured_device_name", name: "設定裝置名稱", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "configured_device_address", name: "設定裝置位址", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "broadcast_mode", name: "廣播模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "output_state_hold", name: "輸出保持模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "pulse_count_edge", name: "脈衝計數邊沿", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "pulse_debounce_ms", name: "脈衝消抖", unit: "ms", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "boot_info_enabled", name: "開機資訊", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "boot_info_content", name: "開機資訊內容", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_heartbeat_seconds", name: "串口心跳週期", unit: "s", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_heartbeat_content", name: "串口心跳內容", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rtc_unix_seconds", name: "RTC Unix 時間", unit: "s", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_baud_rate", name: "串口鮑率", unit: "baud", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_data_bits", name: "串口資料位元", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_stop_bits", name: "串口停止位元", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_parity", name: "串口同位元", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "serial_packet_time_ms", name: "串口封包時間", unit: "ms", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "di_1_pulse_count", name: "DI 1 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_2_pulse_count", name: "DI 2 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_3_pulse_count", name: "DI 3 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_4_pulse_count", name: "DI 4 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_5_pulse_count", name: "DI 5 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_6_pulse_count", name: "DI 6 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_7_pulse_count", name: "DI 7 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "di_8_pulse_count", name: "DI 8 脈衝計數", unit: "pulses", ha: {type: "sensor", state_class: "total_increasing"}}
+  - {key: "rule_1_mode", name: "Rule 1 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_1_action", name: "Rule 1 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_1_output", name: "Rule 1 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_1_input", name: "Rule 1 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_1_param1", name: "Rule 1 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_1_param2", name: "Rule 1 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_mode", name: "Rule 2 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_action", name: "Rule 2 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_output", name: "Rule 2 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_input", name: "Rule 2 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_param1", name: "Rule 2 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_2_param2", name: "Rule 2 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_mode", name: "Rule 3 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_action", name: "Rule 3 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_output", name: "Rule 3 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_input", name: "Rule 3 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_param1", name: "Rule 3 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_3_param2", name: "Rule 3 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_mode", name: "Rule 4 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_action", name: "Rule 4 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_output", name: "Rule 4 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_input", name: "Rule 4 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_param1", name: "Rule 4 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_4_param2", name: "Rule 4 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_mode", name: "Rule 5 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_action", name: "Rule 5 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_output", name: "Rule 5 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_input", name: "Rule 5 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_param1", name: "Rule 5 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_5_param2", name: "Rule 5 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_mode", name: "Rule 6 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_action", name: "Rule 6 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_output", name: "Rule 6 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_input", name: "Rule 6 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_param1", name: "Rule 6 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_6_param2", name: "Rule 6 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_mode", name: "Rule 7 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_action", name: "Rule 7 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_output", name: "Rule 7 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_input", name: "Rule 7 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_param1", name: "Rule 7 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_7_param2", name: "Rule 7 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_mode", name: "Rule 8 模式", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_action", name: "Rule 8 動作 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_output", name: "Rule 8 DO", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_input", name: "Rule 8 DI/AI", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_param1", name: "Rule 8 Param1 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+  - {key: "rule_8_param2", name: "Rule 8 Param2 raw", ha: {type: "sensor", entity_category: "diagnostic"}}
+
+B2_SETTING:
+  - {key: "group_01", name: "Relay Group 01", ha: {type: "select", options: [all_off, all_on, "__UNMATCHED__"], state_key: "group_01", icon: "mdi:toggle-switch-outline"}}
+  - {key: "group_234", name: "Relay Group 234", ha: {type: "select", options: [all_off, pattern_101, "__UNMATCHED__"], state_key: "group_234", icon: "mdi:toggle-switch-outline"}}
+
+# Future writable inventory (intentionally not settings):
+# 40047/40063..40093: configurable name, bus settings, output hold, RTC etc.
+# 40129..40256: 16 Rule blocks (only Rule1..8 shown above).
+# 41281..41296: counters accept only a zero reset per manual.
+# 42049: restart/factory-reset magic register — never expose through HA.
