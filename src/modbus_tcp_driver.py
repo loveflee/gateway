@@ -1,5 +1,5 @@
 # =============================================================================
-#version modbus_tcp_driver.py - V1.3
+#version modbus_tcp_driver.py - V1.4
 # 繼承自 RobustAsyncTcpDriver，供 TCP 與 Gateway 傳輸路徑使用
 #
 # 改動點：
@@ -11,12 +11,23 @@
 # V1.2 : [Protocol] 移除盲目 write() 覆寫，統一使用父類的 Modbus RTU ACK 驗證。
 # V1.3 : [Security] MBAP 無 CRC，不能再落入父類 RTU guard 的 return True；新增
 #          FC05/06/15/16 normal ACK 與 exception 的完整 native TCP contract。
+# V1.4 : [Critical] 修復 V1.3 造成的現行部署回歸（report/058 F1）：V1.3 對所有
+#          write() 一律先做 MBAP 請求驗證，但本專案的 type: tcp 同時承載
+#          RTU-over-TCP（串口伺服器隧道，adapter 產完整 RTU 幀）。RTU 幀的
+#          bytes[2:4] 是暫存器位址，被當成 MBAP Protocol ID → 必然
+#          "Protocol ID mismatch"，封包在送出前即被拒絕。實測
+#          set_switch 產生 01 10 A7 FF 00 01 02 00 01 A5 55 → Protocol ID 43007。
+#          後果：4 台 Solis 的所有 HA 寫入 100% 失敗，且 BusMaster 把格式衝突
+#          記成物理 Timeout 並重試，日誌指向總線／設備而非真正原因。
+#          修法與 driver.py V1.9 的 guard 同源：以「請求端是否帶合法尾端 RTU
+#          CRC16」分流，有 CRC 交回父類 RTU 契約，無 CRC 走原生 MBAP 驗證。
+#          原生 TCP 路徑（adapter: tcp，MBAP 無尾端 CRC）行為逐字不變。
 # =============================================================================
 
 import logging
 import struct
 
-from driver import DriverTimeoutError, RobustAsyncTcpDriver
+from driver import DriverTimeoutError, RobustAsyncTcpDriver, _has_valid_modbus_crc
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +80,23 @@ class AsyncModbusTcpDriver(RobustAsyncTcpDriver):
 
     async def write(self, payload: bytes) -> bool:
         """Validate native Modbus TCP FC05/06/15/16 ACKs; exceptions return False."""
+        # ✅ [Fix V1.4] driver.type: tcp 同時服務兩種語意不同的傳輸，而 driver 無從
+        #    分辨 —— 只有 adapter 知道自己送的是哪一種。判別依據與 driver.py V1.9
+        #    的 guard 完全相同：請求端是否帶合法的尾端 RTU CRC16。
+        #      · adapter 為 rtu／solis_inverter／st_inverter 等 GenericAdapter 家族：
+        #        產生完整 RTU 幀（含 CRC），交回父類的 RTU ACK 契約處理。
+        #      · adapter 為 tcp（modbus_tcp_adapter）：產生 MBAP（無尾端 CRC），
+        #        走下面的原生 Modbus TCP 驗證。
+        #    V1.3 少了這一層分流，於是把 RTU 幀的 bytes[2:4]（暫存器位址）當成
+        #    MBAP Protocol ID，寫入請求在送出前就被自己拒絕 —— 本專案現行部署
+        #    （4 台 Solis，type: tcp + adapter: solis_inverter）的所有 HA 寫入
+        #    100% 失敗，且被 BusMaster 記成物理 Timeout，日誌指向錯誤方向。
+        #    見 report/058。
+        if (len(payload) >= 8
+                and payload[1] in (5, 6, 15, 16)
+                and _has_valid_modbus_crc(payload)):
+            return await super().write(payload)
+
         sent_tx_id, sent_uid, sent_fc, sent_echo = self._validate_write_request(payload)
         response = await self._send_and_recv(payload)
         recv_tx_id, recv_uid, pdu = self._parse_mbap(response, "Write ACK")
