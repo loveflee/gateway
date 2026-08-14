@@ -1,5 +1,5 @@
 # =============================================================================
-# adapter_helper.py - V1.2 工業封存版 verison
+# adapter_helper.py - V1.3 工業封存版 verison
 # 修復歷程 (V1.1 → V1.2)：
 #   - [Critical] offset/length 加 int() 強制轉型 + TypeError 守衛，防 YAML 字串型別炸毀
 #   - [Critical] 步驟 3 & 4 加 try-except 隔離罩，實現單點故障不擴散
@@ -7,9 +7,21 @@
 #   - [Bugfix] length/datatype 不一致加 warning，防靜默解錯數值
 #   - [Bugfix] __init__ / parse() 入口加型別守衛
 #   - [Bugfix] b_pos 強制 int() 轉型，防位元運算 TypeError
+# 修復歷程 (V1.2 → V1.3)：
+#   - [Safety] _unpack_value 的 float32／float64 分支補 math.isfinite，與
+#     generic_adapter V2.10 同一判準（本檔是 ampinvt 等非標設備的解析路徑，
+#     兩條線各自獨立，故需各自把關）。
+#     原本 nan／inf 直接回傳並進入 result → HAManager._state_cache（整包快取、
+#     整包重送）→ 之後每次 json.dumps(allow_nan=False) 都拋 ValueError，該設備
+#     的 state topic 從此永久死亡；輪詢照跑、availability 仍 online，HA 上實體
+#     全部「可用」卻永遠凍結，只有重啟能救。
+#     回傳 None 直接接上呼叫端既有的 `if val is None: continue`。但本解析器
+#     沒有 generic_adapter 的 skipped_null 彙總計數，裸 continue 會變成靜默
+#     丟棄，故拒絕時附一行 WARNING（與本函式既有的長度不符警告同級）。
 # =============================================================================
 import struct
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +191,16 @@ class StandardParser:
                 elif word_order == "byte_swap":
                     c = bytearray([c[1], c[0], c[3], c[2]])
                 if datatype == "float32":
-                    return struct.unpack(">f", bytes(c))[0]
+                    # ✅ [V1.3] 非有限值（NaN／±Inf）視為解不出來，與 generic_adapter
+                    #    V2.10 同一判準。理由見檔頭 V1.3。
+                    val = struct.unpack(">f", bytes(c))[0]
+                    if not math.isfinite(val):
+                        logger.warning(
+                            f"[StandardParser] '{key_name}' float32 解出非有限值 "
+                            f"chunk={chunk.hex()} order={word_order}，視為未能解包"
+                        )
+                        return None
+                    return val
                 elif datatype == "int32":
                     return struct.unpack(">i", bytes(c))[0]
                 else:
@@ -194,7 +215,15 @@ class StandardParser:
                 elif word_order == "byte_swap":
                     c = bytearray([c[1], c[0], c[3], c[2], c[5], c[4], c[7], c[6]])
                 if datatype == "float64":
-                    return struct.unpack(">d", bytes(c))[0]
+                    # ✅ [V1.3] 同 float32 分支。
+                    val = struct.unpack(">d", bytes(c))[0]
+                    if not math.isfinite(val):
+                        logger.warning(
+                            f"[StandardParser] '{key_name}' float64 解出非有限值 "
+                            f"chunk={chunk.hex()} order={word_order}，視為未能解包"
+                        )
+                        return None
+                    return val
                 elif datatype == "int64":
                     return struct.unpack(">q", bytes(c))[0]
                 else:

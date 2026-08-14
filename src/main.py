@@ -1,7 +1,7 @@
 # =============================================================================
-# version main.py v2.11
+# version main.py v2.14
 # 模組名稱：Edge Gateway V3 主控樞紐 (The Controller)
-# 版本狀態：V2.11 (監聽熔斷復原 + 監聽端啟動不阻斷)
+# 版本狀態：V2.12 (監聽熔斷復原 + 監聽端啟動不阻斷 + 指令丟棄可觀測)
 # 核心職責：
 #   1. 生命週期管理：解析 config.yaml，初始化底層通訊與 MQTT 代理。
 #   2. 跨執行緒橋接：採用 Load Shedding (負載拋棄) 策略，防禦 MQTT 洪泛攻擊。
@@ -70,6 +70,20 @@
 #                 僅放寬「實體 connect() 回傳 false」，缺欄位與不支援 type 仍為 fatal。
 #             (2) health payload 新增 listen_decoding_locked，使熔斷鎖定狀態可從 MQTT
 #                 側觀測；否則鎖定後設備只是 unavailable，與單純沒資料無法區分。
+#   - [V2.12] [Observability] _mqtt_consumer_task 內三處裸 continue 補 WARNING：
+#             topic 不符 set 契約、UID 非整數、payload 非 UTF-8。三者原本都讓指令
+#             人間蒸發且零日誌，夾在一段刻意補齊 ERROR 分支的程式碼中間，明顯是漏網。
+#             只新增日誌，判斷條件、continue 行為與其餘分支完全不變。
+#   - [V2.13] [Observability] health payload 新增三個欄位（report/056 F1、F2）：
+#             mqtt_subscribe_failures_total／mqtt_rejected_subscriptions —— broker 以
+#             ACL 拒絕訂閱時，指令通道其實沒建立，但連線、Discovery、實體全部正常，
+#             不從 MQTT 側曝光就只能翻 docker log。
+#             devices[].state_publish_failures —— 「Modbus 讀得到但 MQTT 送不出去」
+#             的次數；設備仍算 ONLINE（正確，兩者不該混為一談），但資料鏈斷在北向
+#             這件事必須看得見。純新增欄位，既有欄位與語意不變。
+#   - [V2.14] MQTT 重連的兩處補送路徑各加一行 ha_mgr.republish_state()
+#             （report/058 F2）。原本只補 Discovery 與 availability，狀態本身
+#             不補 —— 監聽軌因此可能長期「顯示在線但沒有數值」。
 # =============================================================================
 import asyncio
 import signal
@@ -376,6 +390,7 @@ class EdgeGateway:
                 ha_mgr.reset_discovery()
                 ha_mgr.send_discovery(cleanup=False)
                 ha_mgr.republish_availability()
+                ha_mgr.republish_state()
 
     def _schedule_staggered_discovery(self):
         """在 event loop 執行緒上建立分批任務；重連時取代前一個未完成的任務"""
@@ -399,6 +414,7 @@ class EdgeGateway:
                 ha_mgr.reset_discovery()
                 ha_mgr.send_discovery(cleanup=False)
                 ha_mgr.republish_availability()
+                ha_mgr.republish_state()
                 logger.info(f"[Discovery] ({i}/{total}) UID={uid} 已送出")
                 if i < total:
                     await asyncio.sleep(self.discovery_interval)
@@ -437,6 +453,10 @@ class EdgeGateway:
 
                 topic_parts = msg.topic.split('/')
                 if len(topic_parts) < 5 or topic_parts[3] != "set":
+                    # ✅ [v2.12] 原為裸 continue：指令消失且零日誌。
+                    logger.warning(
+                        f"[Command] 丟棄：topic 格式不符 set 契約 topic={msg.topic}"
+                    )
                     continue
 
                 uid_str = topic_parts[2]
@@ -444,11 +464,20 @@ class EdgeGateway:
                 try:
                     uid = int(uid_str)
                 except ValueError:
+                    # ✅ [v2.12] 原為裸 continue。
+                    logger.warning(
+                        f"[Command] 丟棄：UID 非整數 uid='{uid_str}' topic={msg.topic}"
+                    )
                     continue
 
                 try:
                     payload_str = msg.payload.decode('utf-8').strip()
                 except Exception:
+                    # ✅ [v2.12] 原為裸 continue：在 HA 按了沒反應且查無痕跡。
+                    logger.warning(
+                        f"[Command] 丟棄：payload 非 UTF-8 uid={uid} key={key} "
+                        f"({len(msg.payload)} bytes)"
+                    )
                     continue
 
                 if self.listen_master and uid in self.listen_master.adapters:
@@ -506,6 +535,10 @@ class EdgeGateway:
                             "online":        state.get("online", False),
                             "timeout_count": state.get("timeout_count", 0),
                             "success_count": state.get("success_count", 0),
+                            # ✅ [V2.13] 「Modbus 讀得到但 MQTT 送不出去」的次數。
+                            #    設備仍算 ONLINE（正確），但此欄位讓資料鏈斷在
+                            #    北向這件事在 health 上看得見（report/056 F2）。
+                            "state_publish_failures": state.get("state_publish_failures", 0),
                             "mode":          "active"
                         }
 
@@ -527,6 +560,14 @@ class EdgeGateway:
                     # ✅ [Fix V2.7] 累計 health 發布失敗次數。收到的這則必然是成功的，
                     #    所以此欄位的用途是「恢復後告訴你剛才漏掉幾則」。
                     "health_publish_failures_total": self._health_publish_failures,
+                    # ✅ [V2.13] 訂閱是北向指令的唯一入口。broker 以 ACL 拒絕訂閱時
+                    #    連線正常、Discovery 照發、HA 上按鈕俱在，但指令永遠到不了
+                    #    網關（report/056 F1）。這兩個欄位讓該狀態在 MQTT 側可見，
+                    #    不必翻 docker log。正常時為 0 與空陣列。
+                    "mqtt_subscribe_failures_total": getattr(self.mqtt_client, "subscribe_failures", 0),
+                    "mqtt_rejected_subscriptions": sorted(
+                        getattr(self.mqtt_client, "rejected_topics", set())
+                    ),
                 }
 
                 # ✅ [Fix V2.11] 監聽軌解碼鎖定狀態必須可觀測。熔斷鎖定後設備只是

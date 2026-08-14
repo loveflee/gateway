@@ -1,5 +1,11 @@
 # =============================================================================
-#version local_serial_driver.py - V1.9 工業封存版 (抗 Kernel 假死 + 斷線自癒 + GC防護)
+#version local_serial_driver.py - V1.10 工業封存版 (抗 Kernel 假死 + 斷線自癒 + GC防護)
+# V1.10: [Critical] write() 不再丟棄 response 一律回 True（report/058 F4）。設備以
+#        Modbus Exception 明確拒絕時 driver 必須回 False，否則 BusMaster 的
+#        「設備邏輯拒絕」分支永遠進不去；若 verify read 又剛好讀到目標值
+#        （重複寫入現值最易命中），會被記成「寫入驗證成功」而設備其實沒改，
+#        且無任何 ACK 拒絕日誌。判準與 driver.py V1.9／modbus_tcp_driver V1.4
+#        同源：只對格式良好的 RTU 寫入請求套用 ACK 契約，其餘維持盲收。
 # 模組名稱：USB RS485 本地實體串口驅動
 # 修復歷程 (V1.8 → V1.9 完全南向閉環)：
 #   - [Fix] 補回強引用集合 _bg_tasks，徹底根絕 asyncio GC 誤殺背景關閉任務的風險。
@@ -16,7 +22,7 @@ import serial
 import logging
 import time
 
-from driver import DriverTimeoutError
+from driver import DriverTimeoutError, _has_valid_modbus_crc
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +155,45 @@ class LocalSerialDriver:
 
     async def write(self, payload: bytes) -> bool:
         """
-        回歸盲人本色。維持合約回傳 bool：True 代表物理層發送成功，
-        實際設備是否接受，由 bus_master 發動 verify_read() 配合 Adapter.decode() 驗證。
+        回傳 bool：True 代表設備正常 ACK，False 代表設備以 Modbus Exception 明確拒絕。
+
+        ✅ [Fix V1.10] 原本收到 response 就直接丟棄並一律回 True（report/058 F4）。
+           設備回 Exception（例如寫入超出範圍、寫唯讀暫存器）時，driver 不回 False，
+           BusMaster 的「設備邏輯拒絕」分支就永遠進不去；若 verify read 又剛好讀到
+           目標值（重複寫入目前值最容易命中），會被記成「寫入驗證成功」，
+           而設備其實一個 bit 都沒改，全程沒有 ACK 拒絕日誌。
+           判準與 driver.py V1.9／modbus_tcp_driver V1.4 同源：只對「格式良好的
+           RTU 寫入請求」套用 RTU ACK 契約，其餘一律維持既有盲收語意，
+           不影響任何非標準協定的 USB 設備。
         """
         try:
-            await self._send_and_recv(payload)
+            resp = await self._send_and_recv(payload)
+
+            if (len(payload) < 8
+                    or payload[1] not in (5, 6, 15, 16)
+                    or not _has_valid_modbus_crc(payload)):
+                return True
+
+            sent_uid, sent_fc = payload[0], payload[1]
+            if len(resp) == 5 and resp[0] == sent_uid and resp[1] == (sent_fc | 0x80):
+                if not _has_valid_modbus_crc(resp):
+                    raise DriverTimeoutError("Write ACK Exception CRC mismatch")
+                logger.warning(
+                    f"[Driver] Modbus Exception: Slave={sent_uid} "
+                    f"FC=0x{sent_fc:02X} Code={resp[2]}"
+                )
+                return False
+
+            if len(resp) != 8:
+                raise DriverTimeoutError(f"Write ACK length mismatch: expected 8, received {len(resp)}")
+            if resp[0] != sent_uid:
+                raise DriverTimeoutError(f"Write ACK UID mismatch: expected {sent_uid}, received {resp[0]}")
+            if resp[1] != sent_fc:
+                raise DriverTimeoutError(f"Write ACK FC mismatch: expected 0x{sent_fc:02X}, received 0x{resp[1]:02X}")
+            if not _has_valid_modbus_crc(resp):
+                raise DriverTimeoutError("Write ACK CRC mismatch")
+            if resp[2:6] != payload[2:6]:
+                raise DriverTimeoutError("Write ACK echo mismatch")
             return True
         except DriverTimeoutError:
             raise

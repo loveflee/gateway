@@ -1,5 +1,5 @@
 # =============================================================================
-# generic_adapter.py - V2.9 fc 15 實作補足版
+# generic_adapter.py - V2.10 fc 15 實作補足版
 # 核心職責：標準 Modbus RTU 解析器 (TCP/Serial 共用卡車頭)
 # 修復歷程：
 #   V2.3 : 將 decode() 重構，拆分出純函數 _extract_data()。
@@ -27,6 +27,17 @@
 #          build_verify_read() 重用舊 target。
 #          群組寫入只建立一筆 FC15，verify 共用完整 FC01 decoder；任何未命名
 #          狀態固定回 __UNMATCHED__，不得落入 BusMaster 的 None 成功相容分支。
+#   V2.10: [Safety] _unpack_value 的 float32／float64 分支補 math.isfinite，
+#          非有限值改回傳 None，接上既有 skipped_null 計數與命令結束的彙總 WARNING。
+#          原本 nan／inf 會進入 result → HAManager._state_cache（整包快取、整包
+#          重送）→ 之後每一次 json.dumps(allow_nan=False) 都拋 ValueError，該設備
+#          的 state topic 從此永久死亡；而輪詢照跑、_record_success 照記、
+#          availability 仍是 online，HA 上每顆實體都「可用」卻永遠凍結，只有重啟
+#          能救。寫入路徑早有同樣把關（_coerce_legacy_16bit／
+#          _encode_fc16_32bit_value），本版補齊讀取端，兩邊標準一致。
+#          現行 12 份地圖的 float 點位為 0 —— 屬潛伏路徑，不是現行缺陷。
+#          ⚠️ adapters/adapter_helper.py 的 StandardParser 亦解 float32／float64
+#          （L181、L196）且無同等把關，ampinvt 走該路徑，本版未動（不在授權範圍）。
 # =============================================================================
 
 import struct
@@ -124,7 +135,10 @@ class Adapter:
 
             if datatype == 'uint64':  return struct.unpack('>Q', chunk)[0]
             if datatype == 'int64':   return struct.unpack('>q', chunk)[0]
-            if datatype == 'float64': return struct.unpack('>d', chunk)[0]
+            if datatype == 'float64':
+                # ✅ [V2.10] 見 float32 分支的說明；兩處採同一判準。
+                val = struct.unpack('>d', chunk)[0]
+                return val if math.isfinite(val) else None
 
         elif len(chunk) == 4:
             if word_order in ('swap', 'word_swap'):
@@ -136,7 +150,23 @@ class Adapter:
 
             if datatype == 'uint32':  return struct.unpack('>I', chunk)[0]
             if datatype == 'int32':   return struct.unpack('>i', chunk)[0]
-            if datatype == 'float32': return struct.unpack('>f', chunk)[0]
+            if datatype == 'float32':
+                # ✅ [V2.10] 非有限值（NaN／±Inf）一律視為未能解包。
+                #    暫存器內容落在 0x7F80_0000～0x7FFF_FFFF 或 0xFF80_0000 以上時，
+                #    struct.unpack 會產出 nan/inf，原本直接回傳並進入 result。
+                #    HAManager._state_cache 是「整包快取、整包重送」，一旦被寫入
+                #    非有限值，之後每一次 publish 都會在
+                #    json.dumps(..., allow_nan=False) 拋 ValueError —— 該設備的
+                #    state topic 從此永久死亡，但輪詢照跑、_record_success 照記、
+                #    availability 仍是 online，HA 上每顆實體都「可用」卻永遠凍結，
+                #    只有重啟能救。
+                #    寫入路徑早已有同樣的把關（本檔 _coerce_legacy_16bit 與
+                #    _encode_fc16_32bit_value 的 math.isfinite），讀取路徑補齊後
+                #    兩邊標準一致。
+                #    回傳 None 直接接上既有的 skipped_null 計數與命令結束時的
+                #    彙總 WARNING，不新增日誌管道。
+                val = struct.unpack('>f', chunk)[0]
+                return val if math.isfinite(val) else None
 
         elif len(chunk) == 2:
             if word_order == 'little':

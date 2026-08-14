@@ -1,5 +1,5 @@
 # =============================================================================
-#version listen_master.py - V1.14 真・工業旁路轉運工 (無頭殭屍防護版)
+#version listen_master.py - V1.16 真・工業旁路轉運工 (無頭殭屍防護版)
 # 相容：HAManager V2.9.5+、ListenDriver V1.9.2+、(自定義) ListenAdapter
 # 核心職責：
 #   1. 流式派發：將底層 ListenDriver 吐出的位元組流，派發給註冊的切包機。
@@ -55,6 +55,21 @@
 #     置於取回結果之後無效，工作早已提交，worker 仍會被逐一燒光。
 #   - [Fix] 移除熔斷時的 executor 重建：卡死 thread 屬舊 pool 且無法回收，
 #     重建只是在卡死 thread 仍在的情況下疊加新 pool。
+# 修復歷程 (V1.14 -> V1.15)：
+#   - [Critical] 與 bus_master V4.10 同步（report/056 F3）：_process_valid_frame 的
+#     ONLINE 轉換與 _check_offline_status 的 OFFLINE 轉換，皆改為 availability
+#     發布成功才提交 state["online"]。原本先提交再通知，通知失敗後兩處守衛都
+#     永不重入，沒有補送機制。失敗時維持原狀態：ONLINE 方向等下一個有效封包
+#     重試，OFFLINE 方向由下一輪 _check_offline_status（條件仍成立）重試，
+#     未新增計時器。register_device 的初始 offline 發布（V1.14）不需門檻，
+#     該處本來就沒有要提交的狀態轉換。
+# 修復歷程 (V1.15 -> V1.16)：
+#   - [Critical] _force_all_offline 補上 V1.15 漏掉的門檻（report/058 F3）。該處先把
+#     本地狀態改 offline 再通知，通知失敗時 availability cache 被撤回成 online，
+#     而本地已 offline → _check_offline_status 兩個分支都進不去 → 永不補送；
+#     MQTT 一恢復，republish 反而依舊 cache 重送 online，把已斷線設備宣告在線。
+#     改為發布成功才提交，失敗時維持 online 且不更新 last_seen，使離線檢查
+#     下一輪立刻重入（更新 last_seen 會把重試推遲整整一個 offline_time）。
 # =============================================================================
 
 import asyncio
@@ -242,12 +257,25 @@ class ListenMasterDispatcher:
         for uid, state in self.device_states.items():
             # 🚨 [V1.8.5 修復] 拔除 if state["online"] 判斷。
             # 無論當前狀態為何，既然要強制拔管，就必須對 HA 補最後一槍，杜絕孤兒殭屍。
-            state["online"] = False
-            state["last_seen"] = now  
             ha_mgr = self.ha_managers.get(uid)
-            if ha_mgr:
-                ha_mgr.set_availability(False)
-            logger.warning(f"[ListenMaster] 🚨 實體連線中斷或觸發熔斷，設備 #{uid} 強制判定 OFFLINE")
+            # ✅ [V1.16] 與 V1.15 的另外兩處同一原則（report/058 F3）。V1.15 漏了
+            #    這一處：本函式先把本地狀態改成 offline 再通知，通知失敗時
+            #    set_availability 會把 availability cache 撤回成前值（online），
+            #    而本地已是 offline → _check_offline_status 的兩個分支都進不去
+            #    → 永不補送；MQTT 一恢復，republish_availability 反而依那個舊
+            #    cache 重送 online，把一台實際已斷線的設備宣告為在線。
+            #    改為發布成功才提交；失敗則維持 online 且**不更新 last_seen**，
+            #    讓 _check_offline_status 下一輪立刻重入補送（若更新了
+            #    last_seen，重試會被推遲整整一個 offline_time）。
+            if ha_mgr is None or ha_mgr.set_availability(False):
+                state["online"] = False
+                state["last_seen"] = now
+                logger.warning(f"[ListenMaster] 🚨 實體連線中斷或觸發熔斷，設備 #{uid} 強制判定 OFFLINE")
+            else:
+                logger.warning(
+                    f"[ListenMaster] 🚨 設備 #{uid} 需強制 OFFLINE，但 availability 發布失敗，"
+                    f"維持內部 ONLINE 且不更新 last_seen，由離線檢查下一輪重試"
+                )
 
     async def _listen_loop(self):
         loop = asyncio.get_running_loop()
@@ -366,9 +394,17 @@ class ListenMasterDispatcher:
         state["last_seen"] = now
 
         if not state["online"]:
-            state["online"] = True
-            ha_mgr.set_availability(True)
-            logger.info(f"[ListenMaster] 設備 #{uid} 嗅探到有效封包，恢復 ONLINE")
+            # ✅ [V1.15] 與 bus_master V4.10 同一原則（report/056 F3）：發布成功才
+            #    提交本端狀態。原本先提交再通知，通知失敗後本守衛永不重入，
+            #    沒有任何東西會補送 ONLINE。失敗則維持 offline，下一個有效封包重試。
+            if ha_mgr.set_availability(True):
+                state["online"] = True
+                logger.info(f"[ListenMaster] 設備 #{uid} 嗅探到有效封包，恢復 ONLINE")
+            else:
+                logger.warning(
+                    f"[ListenMaster] 設備 #{uid} 已收到有效封包但 availability 發布失敗，"
+                    f"維持內部 OFFLINE，下一個有效封包重試"
+                )
 
         cache = self._last_state_cache[uid]
 
@@ -409,9 +445,16 @@ class ListenMasterDispatcher:
                 continue
 
             if state["online"] and (now - state["last_seen"] > self.offline_time):
-                state["online"] = False
-                ha_mgr.set_availability(False)
-                logger.warning(f"[ListenMaster] 設備 #{uid} 超過 {self.offline_time}s 無有效封包，判定 OFFLINE")
+                # ✅ [V1.15] 同上：發布成功才提交。失敗時維持 online，下一輪
+                #    _check_offline_status（條件仍成立）會再試，不需新增計時器。
+                if ha_mgr.set_availability(False):
+                    state["online"] = False
+                    logger.warning(f"[ListenMaster] 設備 #{uid} 超過 {self.offline_time}s 無有效封包，判定 OFFLINE")
+                else:
+                    logger.warning(
+                        f"[ListenMaster] 設備 #{uid} 已達 OFFLINE 條件但 availability "
+                        f"發布失敗，維持內部 ONLINE，下一輪重試"
+                    )
 
             # 🚀 修復 MEDIUM-C: 最終一致性對齊，解耦私有屬性 _availability_cache
             elif state["online"] and getattr(ha_mgr, '_availability_cache', True) is False:
