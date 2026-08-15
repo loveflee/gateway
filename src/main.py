@@ -1,7 +1,7 @@
 # =============================================================================
-# version main.py v2.14
+# version main.py v2.15
 # 模組名稱：Edge Gateway V3 主控樞紐 (The Controller)
-# 版本狀態：V2.12 (監聽熔斷復原 + 監聽端啟動不阻斷 + 指令丟棄可觀測)
+# 版本狀態：V2.15 (監聽熔斷復原 + 啟動不阻斷 + 指令丟棄可觀測 + 北向失敗可見)
 # 核心職責：
 #   1. 生命週期管理：解析 config.yaml，初始化底層通訊與 MQTT 代理。
 #   2. 跨執行緒橋接：採用 Load Shedding (負載拋棄) 策略，防禦 MQTT 洪泛攻擊。
@@ -84,6 +84,14 @@
 #   - [V2.14] MQTT 重連的兩處補送路徑各加一行 ha_mgr.republish_state()
 #             （report/058 F2）。原本只補 Discovery 與 availability，狀態本身
 #             不補 —— 監聽軌因此可能長期「顯示在線但沒有數值」。
+#   - [V2.15] [Observability] _on_mqtt_connected 的兩則網關發布補 rc 檢查
+#             （report/060 F1）。原本丟棄回傳值，而 paho 失敗只回非零 rc 不拋例外，
+#             故完全無痕跡。後果不對稱地嚴重：每個實體都是雙 topic +
+#             availability_mode: all，網關那則沒送成功，broker 上就留著上一輪 LWT
+#             的 offline → 全部設備的所有實體一起 unavailable，而日誌只說
+#             「MQTT 上線」。任何一次 MQTT 重連都會重跑本函式而自癒，故不做重試，
+#             只讓根因可見。未改用 ha_manager.publish_gateway_online()：那是
+#             per-device 方法，零設備／全隔離時 ha_managers 為空會完全發不出去。
 # =============================================================================
 import asyncio
 import signal
@@ -375,9 +383,28 @@ class EdgeGateway:
                 "payload_off": "offline",
                 "device": gw_device_info
             }
-            self.mqtt_client.publish(gw_discovery_topic, json.dumps(gw_payload), qos=1, retain=True)
+            # ✅ [V2.15] 檢查 rc（report/060 F1）。這兩則原本丟棄回傳值，而 paho 的
+            #    publish() 失敗只回非零 rc、不拋例外，故失敗時完全無痕跡。
+            #    後果不對稱地嚴重：每個 HA 實體都是雙 topic + availability_mode: all，
+            #    網關這則沒送成功，broker 上就留著上一輪 LWT 的 offline ——
+            #    **四台設備的每一顆實體全部 unavailable**，即使資料照樣在 state
+            #    topic 上流動。而日誌只會說「MQTT 上線」，查不到根因。
+            #    任何一次 MQTT 重連都會重跑本函式而自動修復，故不另做重試，
+            #    只要讓根因在日誌裡看得見即可。
+            r = self.mqtt_client.publish(gw_discovery_topic, json.dumps(gw_payload), qos=1, retain=True)
+            if getattr(r, "rc", 0) != 0:
+                logger.error(
+                    f"[MQTT] 🚨 網關 Discovery 發布失敗 rc={r.rc} —— "
+                    f"HA 上的網關連線狀態實體可能不會出現"
+                )
 
-            self.mqtt_client.publish(f"{self.node_id}/status", "online", qos=1, retain=True)
+            r = self.mqtt_client.publish(f"{self.node_id}/status", "online", qos=1, retain=True)
+            if getattr(r, "rc", 0) != 0:
+                logger.error(
+                    f"[MQTT] 🚨 網關 online 狀態發布失敗 rc={r.rc} —— "
+                    f"broker 上仍是舊值（很可能是上一輪 LWT 的 offline），"
+                    f"HA 上【全部設備的所有實體】將顯示不可用，直到下一次 MQTT 重連"
+                )
 
         # ✅ [Fix] 設備層 Discovery 改為分批派送。
         #    本函式跑在 paho 網路執行緒上，絕不可在此 sleep —— 會癱瘓收訊與 keepalive。

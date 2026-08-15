@@ -1,5 +1,5 @@
 # =============================================================================
-#version bus_master.py - V4.11 真・工業封存版 (離線寫入防禦 + 總線側錄版)
+#version bus_master.py - V4.12 真・工業封存版 (離線寫入防禦 + 總線側錄版)
 # 相容：HAManager V2.9+、RobustAsyncTcpDriver V1.3+、GenericAdapter V2.2+
 # 修復歷程 (V4.4 -> V4.5)：
 #   - [Feature] 導入「無損旁路側錄 (Read-Only Monitor)」機制。
@@ -43,6 +43,15 @@
 #     告警（report/056 F2）。刻意**不**改變 _record_success：MQTT 發不出去不代表
 #     Modbus 讀不到，把兩者混為一談會讓 broker 斷線時四台設備一起假離線。
 #     此欄位一併進 health payload，讓「gateway 讀得到、HA 收不到」的分叉可見。
+# 修復歷程 (V4.11 -> V4.12)：
+#   - [Observability] 解碼失敗不再被誤分類為「未預期例外」（report/059）。本模組與
+#     各 Adapter 各自定義了同名但不同的 DataDecodeError，故 `except DataDecodeError`
+#     從來攔不到 Adapter 丟出來的那個 —— 每一次雜訊幀都印完整 traceback 並記 ERROR。
+#     實測雙 master 環境下 3 分鐘可產生 200+ 行 traceback，把已知環境噪音偽裝成
+#     系統崩潰。改以鴨子型別 _is_decode_error() 收斂（與 main.py 用 hasattr 檢查
+#     Adapter 契約同一原則；BusMaster 不得 import adapters）。
+#     處置完全不變：兩條分支同樣呼叫 _record_failure／累計 physical_fault_count，
+#     只改日誌等級與訊息，並明說「下一輪重試」。
 # =============================================================================
 
 import asyncio
@@ -84,6 +93,25 @@ def _log_traffic(msg: str):
         _traffic_log_ref.append(msg)
 
 _ADAPTER_REQUIRED = ("encode_write", "build_verify_read", "build_poll_read", "decode")
+
+
+def _is_decode_error(exc: BaseException) -> bool:
+    """
+    ✅ [V4.12] 判斷例外是否為「Adapter 層的解碼失敗」（report/059）。
+
+    為何用類別名稱而非 isinstance：本模組的 DataDecodeError 與各 Adapter 自己
+    定義的 DataDecodeError 是**不同的類別**（generic_adapter、st_inverter、
+    ampinvt 各定義一份），所以 `except DataDecodeError` 從來攔不到 Adapter 丟出來
+    的那個 —— 每一次雜訊幀都掉進「未預期例外」分支，印完整 traceback 並記 ERROR。
+    功能無害（兩條分支同樣呼叫 _record_failure），但 traceback 把已知的環境噪音
+    偽裝成系統崩潰，日誌幾乎無法閱讀。
+
+    BusMaster 不得 import adapters（那會反轉外掛依賴方向）。而整套 Adapter 契約
+    本來就是鴨子型別的 —— main.py 以 hasattr 檢查 _ADAPTER_REQUIRED，不是
+    isinstance —— 故此處以同樣的鴨子型別判斷收斂，與既有架構一致。
+    本模組自己的 DataDecodeError 名稱相同，一併命中，無須額外分支。
+    """
+    return type(exc).__name__ == "DataDecodeError"
 
 class BusMasterScheduler:
     MAX_PENDING_WRITES = 200
@@ -361,11 +389,16 @@ class BusMasterScheduler:
                         #    也不改變本迴圈的控制流。
                         ha_mgr.publish_state(decoded)
 
-                except DataDecodeError as e:
-                    logger.warning(f"[{uid}] 解析失敗: {e} (嘗試 {attempt}/{max_attempts-1})")
-                    physical_fault_count += 1
-                except Exception:
-                    logger.exception(f"[{uid}] 解碼未預期例外 (嘗試 {attempt}/{max_attempts-1})")
+                except Exception as e:
+                    # ✅ [V4.12] 解碼失敗與真正的程式例外分流。兩者的處置完全相同
+                    #    （都計為物理故障並重試），差別只在日誌等級與有無 traceback。
+                    if _is_decode_error(e):
+                        logger.warning(
+                            f"[{uid}] 回讀收到無法解包的資料，下一次嘗試重新解包: {e} "
+                            f"(嘗試 {attempt}/{max_attempts-1})"
+                        )
+                    else:
+                        logger.exception(f"[{uid}] 解碼未預期例外 (嘗試 {attempt}/{max_attempts-1})")
                     physical_fault_count += 1
 
             await asyncio.sleep(0.5)
@@ -446,11 +479,14 @@ class BusMasterScheduler:
                             )
                 self._record_success(uid)
 
-            except DataDecodeError as e:
-                logger.warning(f"[{uid}] 輪詢解析失敗: {e}")
-                rescheduled = self._record_failure(uid)
-            except Exception:
-                logger.exception(f"[{uid}] 輪詢解碼未預期例外")
+            except Exception as e:
+                # ✅ [V4.12] 亂碼／雜訊幀無法解包是雙 master 共線環境的已知常態，
+                #    一行 WARNING 陳述現況與下一步即可，不需要 traceback。
+                #    真正的程式例外仍保留完整 traceback。兩者處置相同。
+                if _is_decode_error(e):
+                    logger.warning(f"[{uid}] 輪詢收到無法解包的資料，下一輪重試: {e}")
+                else:
+                    logger.exception(f"[{uid}] 輪詢解碼未預期例外")
                 rescheduled = self._record_failure(uid)
 
         if not rescheduled:

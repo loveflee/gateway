@@ -1,5 +1,5 @@
 # =============================================================================
-# ha_manager.py - V3.0.14 真・工業防護版 (UI 隔離閉環版)
+# ha_manager.py - V3.0.15 真・工業防護版 (UI 隔離閉環版)
 # 模組名稱：Home Assistant MQTT Discovery 管理模組
 # 升級亮點：無損升級，相容舊有地圖檔，全面導入防禦性編程 (Defensive Programming)
 # 修復歷程：
@@ -65,6 +65,10 @@
 #               空白或舊值直到某個值再次改變 —— 期間實體顯示 online 且零日誌。
 #               本方法刻意繞過 200ms 節流與變動判斷，呼叫點僅 MQTT 重連
 #               （main.py 已分批間隔 2s）。
+#   - [V3.0.15] publish_gateway_online／offline 補回傳值與「不要接上 main.py」的
+#               警告註解（report/060 F1）。兩者全專案無人呼叫；它們是 per-device
+#               方法，零設備或全部隔離時 ha_managers 為空，接上去會讓網關狀態在
+#               最需要的時候完全發不出去。網關可用性的正解在 main.py。
 # =============================================================================
 import logging
 import json
@@ -365,13 +369,23 @@ class HAManager:
             return False
         return True
 
-    def publish_gateway_online(self):
-        self._safe_publish(self.gateway_status_topic, "online", qos=1, retain=True, is_json=False)
+    # ⚠️ [V3.0.15] 以下兩個方法目前【全專案無人呼叫】，且**不應該**被 main.py 拿去
+    #    發布網關狀態。它們掛在「每台設備」的 HAManager 上，要用就得先有至少一個
+    #    HAManager 實例；而零設備或全部被隔離時 EdgeGateway.ha_managers 是空的，
+    #    網關狀態就永遠發不出去 —— 那正是最需要它的時候（操作者清空 devices 進
+    #    WebUI 搶修）。實際的網關狀態發布在 main.py 的 _on_mqtt_connected()，
+    #    直接走 mqtt_client 且已檢查 rc（V2.15）。
+    #    保留這兩個方法是為了單台設備的獨立使用情境；改動網關可用性時請改 main.py，
+    #    不要把它們接上去。
+    def publish_gateway_online(self) -> bool:
+        ok = self._safe_publish(self.gateway_status_topic, "online", qos=1, retain=True, is_json=False)
         logger.info(f"📡 [{self.node_id}] 網關：online")
+        return ok
 
-    def publish_gateway_offline(self):
-        self._safe_publish(self.gateway_status_topic, "offline", qos=1, retain=True, is_json=False)
+    def publish_gateway_offline(self) -> bool:
+        ok = self._safe_publish(self.gateway_status_topic, "offline", qos=1, retain=True, is_json=False)
         logger.info(f"📡 [{self.node_id}] 網關：offline")
+        return ok
 
     def _get_base_payload(self, item: dict, key: str) -> dict:
         unique_id = f"{self.entity_base}_{key}"

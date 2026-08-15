@@ -1,5 +1,5 @@
 # =============================================================================
-#version listen_master.py - V1.16 真・工業旁路轉運工 (無頭殭屍防護版)
+#version listen_master.py - V1.17 真・工業旁路轉運工 (無頭殭屍防護版)
 # 相容：HAManager V2.9.5+、ListenDriver V1.9.2+、(自定義) ListenAdapter
 # 核心職責：
 #   1. 流式派發：將底層 ListenDriver 吐出的位元組流，派發給註冊的切包機。
@@ -70,6 +70,11 @@
 #     MQTT 一恢復，republish 反而依舊 cache 重送 online，把已斷線設備宣告在線。
 #     改為發布成功才提交，失敗時維持 online 且不更新 last_seen，使離線檢查
 #     下一輪立刻重入（更新 last_seen 會把重試推遲整整一個 offline_time）。
+# 修復歷程 (V1.16 -> V1.17)：
+#   - [Observability] 超長字串（>256）欄位的丟棄補 WARNING（report/060 F4）。守衛
+#     本身正確（防垃圾幀撐爆 state cache），錯的只有不出聲：同幀其他欄位照常發布、
+#     設備仍 online，HA 上就那一個欄位停在舊值。現行 12 份地圖最長的 string 欄位
+#     為 32 bytes 且只存在於主動軌的 relay_8ch_full_map，此路徑目前不可觸發。
 # =============================================================================
 
 import asyncio
@@ -366,10 +371,24 @@ class ListenMasterDispatcher:
                             continue
 
                         clean_data = {}
+                        dropped_long = []
                         for k, v in decoded_data.items():
                             if isinstance(v, str) and len(v) > 256:
+                                # ✅ [V1.17] 原為裸 continue（report/060 F4）。這道守衛
+                                #    本身是對的（防解析器對著垃圾幀吐出超長字串撐爆
+                                #    state cache），錯的只有它不出聲：同一幀其他欄位
+                                #    照常發布、設備仍標 online，HA 上就那一個欄位停在
+                                #    舊值，使用者幾乎不可能察覺是被網關丟掉的。
+                                dropped_long.append((k, len(v)))
                                 continue
                             clean_data[k] = v
+
+                        if dropped_long:
+                            logger.warning(
+                                f"[ListenMaster] 設備 #{uid} 丟棄超長字串欄位 "
+                                f"{[(k, f'{n}字元') for k, n in dropped_long]}（上限 256）—— "
+                                f"該欄位在 HA 上會停在舊值，其餘欄位照常更新"
+                            )
 
                         if clean_data:
                             self._process_valid_frame(uid, ha_mgr, clean_data, now)
