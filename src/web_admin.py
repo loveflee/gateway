@@ -1,5 +1,5 @@
 # =============================================================================
-# web_admin.py - V6.7 終極側錄版 (支援 Sniffer 獨占 + 總線即時唯讀側錄)
+# web_admin.py - V6.8 終極側錄版 (支援 Sniffer 獨占 + 總線即時唯讀側錄)
 # 修復歷程：
 #   - [V6.1] restore 改用與 save 相同的原子替換路徑。原本 /api/restore 直接
 #            shutil.copy2(BACKUP_PATH, CONFIG_PATH) 覆寫目標，複製途中若斷電或
@@ -40,8 +40,14 @@
 #   - [V6.7] Adapter／Profile 下拉改讀唯讀 catalog：Adapter 與 Gateway 啟動共用
 #            同一外掛 discovery helper；Profile 掃描現有 .yaml 地圖。catalog 不收緊
 #            config 驗證，且前端保留既有但已無法發現的值，避免救援設定被下拉選單吃掉。
+#   - [V6.8] 新增 POST /api/discovery/resend（report/061 方案 B）。Discovery 是
+#            retained，網關只在「MQTT 連上」那一刻發送；而 retained 被手動刪除、
+#            個別 publish rc≠0、broker 對 homeassistant/# 的 publish ACL 靜默丟棄
+#            這三種情況都【不產生斷線事件】，網關毫無所覺，實體再也不會回到 HA。
+#            V2.16 的 HA birth 監聽覆蓋大部分自動情境，本 API 是沒接住時的手動出口，
+#            讓操作者不必為了補一顆實體重啟整台網關。走既有分批派送，不新增發送路徑。
 # =============================================================================
-import yaml, os, signal, threading, time, secrets, fcntl, shutil, math
+import yaml, os, signal, threading, time, secrets, fcntl, shutil, math, logging
 import asyncio, concurrent.futures
 import app_state  # 🚨 必須確保同目錄下有 app_state.py
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -435,6 +441,57 @@ def restart_system():
         os.kill(os.getpid(), signal.SIGTERM)
     threading.Thread(target=graceful_kill, daemon=True).start()
     return {"status": "restarting"}
+
+@app.post("/api/discovery/resend", dependencies=[Depends(require_auth)])
+def resend_discovery():
+    """
+    ✅ [V6.8] 手動重送全部 HA Discovery（report/061 方案 B）。
+
+    為什麼需要這顆按鈕：Discovery 是 retained 訊息，網關只在「MQTT 連上」那一刻
+    發送。以下三種情況 broker 上的 retained 會消失或從未寫入，而**都不會產生斷線
+    事件**，網關因此毫無所覺，實體再也不會回到 HA：
+      · 有人手動刪掉 retained（在 HA 裡刪實體、或用 MQTT Explorer 清 topic）
+      · 個別 publish 回非零 rc 失敗
+      · broker 對 homeassistant/# 的 publish ACL 靜默丟棄（rc 仍為 0，連日誌都沒有）
+
+    V2.16 已訂閱 HA birth message 自動覆蓋大部分情境；這支 API 是當自動機制沒接住
+    時的手動出口，讓操作者不必為了補一顆實體去重啟整台網關。
+
+    走既有的分批派送（每台間隔 discovery_interval 秒），不新增發送路徑。
+    """
+    gw = getattr(app_state, 'gateway', None)
+    if not gw:
+        raise HTTPException(status_code=503, detail="Gateway 尚未就緒")
+
+    loop = getattr(gw, '_loop', None)
+    if loop is None or loop.is_closed():
+        raise HTTPException(status_code=503, detail="Gateway event loop 不可用")
+
+    mgrs = getattr(gw, 'ha_managers', {}) or {}
+    if not mgrs:
+        raise HTTPException(status_code=409, detail="目前沒有已掛載的設備，無 Discovery 可重送")
+
+    if not getattr(gw, 'mqtt_client', None):
+        raise HTTPException(status_code=503, detail="MQTT 未連線，無法重送")
+
+    try:
+        loop.call_soon_threadsafe(gw._schedule_staggered_discovery)
+    except Exception as e:
+        logging.getLogger("Main").exception("[WebUI] 重送 Discovery 排程失敗")
+        raise HTTPException(status_code=500, detail=f"排程失敗: {e}")
+
+    interval = float(getattr(gw, 'discovery_interval', 2.0))
+    count = len(mgrs)
+    logging.getLogger("Main").info(
+        f"[WebUI] 手動觸發 Discovery 重送：{count} 台，間隔 {interval}s"
+    )
+    return {
+        "status": "scheduled",
+        "devices": count,
+        "interval_s": interval,
+        "eta_s": round(max(0, count - 1) * interval, 1),
+        "message": f"已排程重送 {count} 台的 Discovery，每台間隔 {interval}s",
+    }
 
 @app.get("/api/quarantine", dependencies=[Depends(require_auth)])
 def get_quarantine():

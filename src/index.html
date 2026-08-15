@@ -127,6 +127,8 @@ input:checked + .slider:before { transform: translateX(16px); }
     <div class="logo"><div class="dot" id="led"></div><span id="gw-title">Edge Gateway</span></div>
     <div class="hdr-btns">
       <button class="btn btn-g" id="b-restore" onclick="restoreConfig()">↩ 還原</button>
+      <button class="btn btn-g" id="b-rediscover" onclick="resendDiscovery()"
+              title="HA 上的實體不見了（被誤刪、或 broker 的 retained 掉了）時按這裡補回來，不必重啟網關">📡 重送 Discovery</button>
       <button class="btn btn-p" id="b-save" onclick="saveConfig()">💾 儲存</button>
       <button class="btn btn-d" id="b-restart" onclick="restartSystem()">⟳ 重啟</button>
     </div>
@@ -700,6 +702,26 @@ async function restoreConfig(){
     else st('還原失敗：'+res.msg,'err');
   }catch(e){ st('網路錯誤：'+e,'err'); }
   finally{ setLoading('b-restore',false); }
+}
+
+/* 📡 手動重送 HA Discovery（report/061 方案 B）
+   Discovery 是 retained，網關只在 MQTT 連上那一刻發送。retained 被誤刪、
+   個別 publish 失敗、或 broker ACL 靜默丟棄時都不會產生斷線事件，
+   實體因此再也不會回到 HA。這顆按鈕是不必重啟網關的補救出口。
+   不動設定檔、不重啟、不影響輪詢 —— 只是把 Discovery 再發一次。 */
+async function resendDiscovery(){
+  if(!confirm('重送全部設備的 HA Discovery？\n\n不會重啟服務、不影響輪詢與資料，只是把實體註冊表再發一次給 HA。')) return;
+  setLoading('b-rediscover',true);
+  try{
+    const r=await fetch('/api/discovery/resend',{method:'POST'});
+    const res=await r.json();
+    if(r.ok && res.status==='scheduled'){
+      st(`已排程重送 ${res.devices} 台，每台間隔 ${res.interval_s}s，約 ${res.eta_s}s 完成`,'ok');
+    } else {
+      st('重送失敗：'+(res.detail||res.message||r.status),'err');
+    }
+  }catch(e){ st('網路錯誤：'+e,'err'); }
+  finally{ setLoading('b-rediscover',false); }
 }
 
 async function restartSystem(){

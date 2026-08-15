@@ -1,7 +1,7 @@
 # =============================================================================
-# version main.py v2.15
+# version main.py v2.16
 # 模組名稱：Edge Gateway V3 主控樞紐 (The Controller)
-# 版本狀態：V2.15 (監聽熔斷復原 + 啟動不阻斷 + 指令丟棄可觀測 + 北向失敗可見)
+# 版本狀態：V2.16 (監聽熔斷復原 + 啟動不阻斷 + 北向失敗可見 + HA birth 重送)
 # 核心職責：
 #   1. 生命週期管理：解析 config.yaml，初始化底層通訊與 MQTT 代理。
 #   2. 跨執行緒橋接：採用 Load Shedding (負載拋棄) 策略，防禦 MQTT 洪泛攻擊。
@@ -92,6 +92,22 @@
 #             「MQTT 上線」。任何一次 MQTT 重連都會重跑本函式而自癒，故不做重試，
 #             只讓根因可見。未改用 ha_manager.publish_gateway_online()：那是
 #             per-device 方法，零設備／全隔離時 ha_managers 為空會完全發不出去。
+#   - [V2.16] [Feature] 訂閱 HA birth message，補上 Discovery 唯一的重送觸發點
+#             （report/061 方案 A）。原本 Discovery 只在 MQTT 重連時重送，於是
+#             三種情境永遠補不回來，因為它們都不產生斷線事件：
+#               (1) 有人手動刪掉 broker 上的 retained（HA 裡刪實體、MQTT Explorer）
+#               (2) 個別 publish rc≠0 失敗（V3.0.13 會印 ERROR 但不會自己補）
+#               (3) broker 對 homeassistant/# 的 publish ACL 靜默丟棄（rc 仍為 0）
+#             HA 啟動時往 {discovery_prefix}/status 發 online，是官方建議整合方
+#             監聽的訊號。收到後**先等 ha_birth_settle_delay(10s)** 再開始 ——
+#             HA 剛啟動時 MQTT 整合／entity registry／recorder 都還在初始化，
+#             此時灌 200+ 則 retained 有被漏接的風險。
+#             重送沿用既有 _schedule_staggered_discovery()，維持每台 2s 分批，
+#             並自動取消前一批未完成任務。
+#             三層防重複：距本進程自己連上未滿 settle_delay 則略過（擋掉 retained
+#             birth 在訂閱當下立刻送達的那次）、已有待發任務則略過、實際發送走
+#             既有分批路徑。關機時 _birth_task 一併取消，避免 sleep 醒來後對
+#             已斷線的 broker 發送。
 # =============================================================================
 import asyncio
 import signal
@@ -184,6 +200,16 @@ class EdgeGateway:
         # Discovery 分批派送：每台之間的間隔秒數，與其背景任務控制代碼
         self.discovery_interval: float = 2.0
         self._discovery_task: asyncio.Task | None = None
+
+        # ✅ [V2.16] HA birth message 觸發的 Discovery 重送。
+        #    · settle_delay：收到 birth 後先等這麼久再開始發。HA 剛啟動時 MQTT
+        #      整合、entity registry、recorder 都還在初始化，此時灌 200+ 則 retained
+        #      有被漏接的風險；等它穩定再送比較保險。
+        #    · _last_connect_time：本進程自己剛連上時已經發過一輪，若 HA 的 birth
+        #      是 retained 訊息會在訂閱當下立刻收到，這裡用來略過那次重複。
+        self.ha_birth_settle_delay: float = 10.0
+        self._last_connect_time: float = 0.0
+        self._birth_task: asyncio.Task | None = None
 
         # 🚨 補丁 2：防禦性初始化，避免其他 Task 提早讀取造成 AttributeError
         self.sniffer_mode = False
@@ -358,11 +384,21 @@ class EdgeGateway:
 
     def _on_mqtt_connected(self):
         logger.info("MQTT 上線，執行 Discovery 與訂閱...")
+        self._last_connect_time = time.monotonic()
         cmd_topic = f"{self.node_id}/+/+/set/+"
         self.mqtt_client.subscribe(cmd_topic, qos=1)
 
         restart_topic_sub = f"{self.node_id}/system/set/restart"
         self.mqtt_client.subscribe(restart_topic_sub, qos=1)
+
+        # ✅ [V2.16] 訂閱 HA 的 birth message（report/061 方案 A）。
+        #    Discovery 原本只在「MQTT 重連」時重送，於是三種情境永遠補不回來：
+        #      · 有人手動刪掉 broker 上的 retained（HA 裡刪實體、MQTT Explorer）
+        #      · 個別 publish rc≠0 失敗
+        #      · broker 對 homeassistant/# 的 publish ACL 靜默丟棄
+        #    這些都不會產生斷線事件，網關毫無所覺。HA 啟動時會往
+        #    {discovery_prefix}/status 發 online，那是官方建議整合方監聽的訊號。
+        self.mqtt_client.subscribe(self.ha_birth_topic, qos=1)
 
         if self.mqtt_client:
             discovery_prefix = self.discovery_prefix
@@ -418,6 +454,54 @@ class EdgeGateway:
                 ha_mgr.send_discovery(cleanup=False)
                 ha_mgr.republish_availability()
                 ha_mgr.republish_state()
+
+    @property
+    def ha_birth_topic(self) -> str:
+        """HA 的 birth／will topic。跟著 discovery_prefix 走（HA 端可自訂前綴）。"""
+        return f"{self.discovery_prefix}/status"
+
+    def _schedule_birth_discovery(self):
+        """
+        ✅ [V2.16] 收到 HA birth 後排程一次 Discovery 重送（report/061 方案 A）。
+
+        三層防護，避免重複灌爆 broker：
+          1. 距本進程自己連上未滿 settle_delay → 略過（那一輪剛發完，
+             且 HA 的 birth 若為 retained 會在訂閱當下立刻送達，必須擋掉）
+          2. 已有待發任務 → 略過（HA 短時間內重發多次 birth 只算一次）
+          3. 實際重送走既有的 _schedule_staggered_discovery()，沿用每台
+             discovery_interval 秒的分批間隔，並自動取消前一個未完成的批次
+        """
+        if self._loop is None or self._loop.is_closed():
+            return
+
+        since_connect = time.monotonic() - self._last_connect_time
+        if since_connect < self.ha_birth_settle_delay:
+            logger.info(
+                f"[HA Birth] 收到 online，但本進程 {since_connect:.1f}s 前才連上並已發過 "
+                f"Discovery，略過重複重送"
+            )
+            return
+
+        if self._birth_task and not self._birth_task.done():
+            logger.info("[HA Birth] 收到 online，但已有待發的重送任務，忽略本次")
+            return
+
+        logger.info(
+            f"[HA Birth] Home Assistant 已上線 —— {self.ha_birth_settle_delay:.0f}s 後"
+            f"重送全部 Discovery（等 HA 端 MQTT 整合初始化穩定）"
+        )
+        self._birth_task = self._loop.create_task(self._delayed_birth_discovery())
+
+    async def _delayed_birth_discovery(self):
+        try:
+            await asyncio.sleep(self.ha_birth_settle_delay)
+            if not self.running:
+                return
+            logger.info("[HA Birth] 開始重送 Discovery")
+            self._schedule_staggered_discovery()
+        except asyncio.CancelledError:
+            logger.info("[HA Birth] 待發的 Discovery 重送已中止（關機或重連）")
+            raise
 
     def _schedule_staggered_discovery(self):
         """在 event loop 執行緒上建立分批任務；重連時取代前一個未完成的任務"""
@@ -476,6 +560,21 @@ class EdgeGateway:
                     if self._loop and not self._loop.is_closed():
                         if not self._shutdown_task:
                             self._shutdown_task = self._loop.create_task(self.stop())
+                    continue
+
+                # ✅ [V2.16] HA birth message。必須擋在 topic 解析之前 ——
+                #    它只有兩段（homeassistant/status），會被下面的 set 契約檢查
+                #    當成格式錯誤而丟棄並告警。
+                if msg.topic == self.ha_birth_topic:
+                    try:
+                        birth = msg.payload.decode('utf-8').strip().lower()
+                    except Exception:
+                        logger.warning(f"[HA Birth] payload 非 UTF-8，忽略 topic={msg.topic}")
+                        continue
+                    if birth == "online":
+                        self._schedule_birth_discovery()
+                    else:
+                        logger.info(f"[HA Birth] Home Assistant 回報 '{birth}'，不觸發重送")
                     continue
 
                 topic_parts = msg.topic.split('/')
@@ -1088,13 +1187,17 @@ class EdgeGateway:
             except Exception: pass
 
         # ✅ 取消 Discovery 分批任務，避免關機期間仍對已斷線的 Broker 發送
-        if self._discovery_task and not self._discovery_task.done():
-            self._discovery_task.cancel()
-            try:
-                await self._discovery_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._discovery_task = None
+        # ✅ [V2.16] birth 觸發的待發任務同樣要取消 —— 它會 sleep 10 秒，
+        #    若不取消，關機期間醒來會對已斷線的 broker 排一整批 Discovery。
+        for attr in ("_birth_task", "_discovery_task"):
+            t = getattr(self, attr, None)
+            if t and not t.done():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            setattr(self, attr, None)
 
         for t in self._bg_tasks:
             t.cancel()
